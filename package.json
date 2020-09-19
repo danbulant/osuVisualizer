@@ -4,6 +4,7 @@
   "version": "0.2.0",
   "description": "Osu! visualizer",
   "main": "src/index.js",
+  "repository": "github:danbulant/osuVisualizer",
   "scripts": {
     "start": "concurrently \"npm:svelte-dev\" \"electron-forge start\"",
     "package": "electron-forge package",
