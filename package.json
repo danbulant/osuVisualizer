@@ -1,7 +1,7 @@
 {
   "name": "osu",
   "productName": "osu",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Osu! visualizer",
   "main": "src/index.js",
   "scripts": {
@@ -48,9 +48,11 @@
   },
   "dependencies": {
     "concurrently": "^5.3.0",
+    "discord-rpc": "^3.1.4",
     "electron-is-dev": "^1.2.0",
     "electron-reload": "^1.5.0",
     "electron-squirrel-startup": "^1.0.0",
+    "electron-store": "^6.0.0",
     "osu-db-parser": "^1.0.35",
     "osu-parser": "^0.3.3",
     "sirv-cli": "^1.0.0",
