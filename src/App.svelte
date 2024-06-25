@@ -8,6 +8,7 @@
     var songData = {};
     var config = store.get("config");
     var osuData = {};
+    const osuFolder = process.env.OSU_FOLDER || process.env.USERPROFILE + "/AppData/Local/osu!";
     
     (() => {
         const configTemplate = {
@@ -50,10 +51,10 @@
 
 <main>
     <div class="background">
-        <Visualizer bind:songData bind:osuData {config} />
+        <Visualizer bind:songData bind:osuData {config} {osuFolder} />
     </div>
     <div class="menu">
-        <Menu bind:song={songData} bind:osuData bind:config />
+        <Menu bind:song={songData} bind:osuData bind:config {osuFolder} />
     </div>
 </main>
 

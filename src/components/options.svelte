@@ -1,6 +1,7 @@
 <script>
     export var config;
     export var visible;
+    export var osuFolder;
 
     $: console.log("Config", config);
 </script>
@@ -54,6 +55,7 @@
                 <input type="range" min="1000" max="15000" step="500" bind:value={config.autohide.volume}>
             </div>
         </div>
+        <span>Osu folder used: <code>{osuFolder}</code></span>
     </nav>
 </div>
     
@@ -80,6 +82,7 @@
         background: rgba(0,0,0,0.4);
         color: white;
         z-index: 4;
+        padding-left: 1rem;
         transition: opacity 0.3s, left 0.3s;
     }
     nav.visible {

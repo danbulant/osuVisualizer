@@ -11,6 +11,8 @@ if (require('electron-squirrel-startup')) { // eslint-disable-line global-requir
 
 if (!isDev) require('update-electron-app')()
 
+console.log("isDev?", isDev);
+
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 
 var mainWindow;
@@ -32,7 +34,10 @@ const createWindow = () => {
     mainWindow.loadFile(path.join(__dirname, '../public/index.html'));
 
     // Open the DevTools.
-    if(isDev) mainWindow.webContents.openDevTools();
+    if(isDev) mainWindow.webContents.openDevTools({
+        activate: true,
+        mode: 'detach'
+    });
 };
 
 require('electron-reload')(__dirname, {
@@ -72,7 +77,7 @@ async function setActivity() {
 
     const activity = await mainWindow.webContents.executeJavaScript('window.songActivity');
 
-    rpc.setActivity(activity);
+    rpc.setActivity(activity).catch((e) => { console.error(e); });
 }
 
 rpc.on('ready', () => {

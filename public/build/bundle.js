@@ -1,5 +1,5 @@
 
-(function(l, r) { if (l.getElementById('livereloadscript')) return; r = l.createElement('script'); r.async = 1; r.src = '//' + (window.location.host || 'localhost').split(':')[0] + ':35729/livereload.js?snipver=1'; r.id = 'livereloadscript'; l.getElementsByTagName('head')[0].appendChild(r) })(window.document);
+(function(l, r) { if (!l || l.getElementById('livereloadscript')) return; r = l.createElement('script'); r.async = 1; r.src = '//' + (self.location.host || 'localhost').split(':')[0] + ':35729/livereload.js?snipver=1'; r.id = 'livereloadscript'; l.getElementsByTagName('head')[0].appendChild(r) })(self.document);
 var app = (function () {
     'use strict';
 
@@ -24,10 +24,17 @@ var app = (function () {
     function safe_not_equal(a, b) {
         return a != a ? b == b : a !== b || ((a && typeof a === 'object') || typeof a === 'function');
     }
+    let src_url_equal_anchor;
+    function src_url_equal(element_src, url) {
+        if (!src_url_equal_anchor) {
+            src_url_equal_anchor = document.createElement('a');
+        }
+        src_url_equal_anchor.href = url;
+        return element_src === src_url_equal_anchor.href;
+    }
     function is_empty(obj) {
         return Object.keys(obj).length === 0;
     }
-
     function append(target, node) {
         target.appendChild(node);
     }
@@ -69,7 +76,12 @@ var app = (function () {
         input.value = value == null ? '' : value;
     }
     function set_style(node, key, value, important) {
-        node.style.setProperty(key, value, important ? 'important' : '');
+        if (value === null) {
+            node.style.removeProperty(key);
+        }
+        else {
+            node.style.setProperty(key, value, important ? 'important' : '');
+        }
     }
     function select_option(select, value) {
         for (let i = 0; i < select.options.length; i += 1) {
@@ -79,6 +91,7 @@ var app = (function () {
                 return;
             }
         }
+        select.selectedIndex = -1; // no option should be selected
     }
     function select_value(select) {
         const selected_option = select.querySelector(':checked') || select.options[0];
@@ -87,23 +100,15 @@ var app = (function () {
     function toggle_class(element, name, toggle) {
         element.classList[toggle ? 'add' : 'remove'](name);
     }
-    function custom_event(type, detail) {
+    function custom_event(type, detail, { bubbles = false, cancelable = false } = {}) {
         const e = document.createEvent('CustomEvent');
-        e.initCustomEvent(type, false, false, detail);
+        e.initCustomEvent(type, bubbles, cancelable, detail);
         return e;
     }
 
     let current_component;
     function set_current_component(component) {
         current_component = component;
-    }
-    function get_current_component() {
-        if (!current_component)
-            throw new Error(`Function called outside component initialization`);
-        return current_component;
-    }
-    function onMount(fn) {
-        get_current_component().$$.on_mount.push(fn);
     }
 
     const dirty_components = [];
@@ -124,22 +129,40 @@ var app = (function () {
     function add_flush_callback(fn) {
         flush_callbacks.push(fn);
     }
-    let flushing = false;
+    // flush() calls callbacks in this order:
+    // 1. All beforeUpdate callbacks, in order: parents before children
+    // 2. All bind:this callbacks, in reverse order: children before parents.
+    // 3. All afterUpdate callbacks, in order: parents before children. EXCEPT
+    //    for afterUpdates called during the initial onMount, which are called in
+    //    reverse order: children before parents.
+    // Since callbacks might update component values, which could trigger another
+    // call to flush(), the following steps guard against this:
+    // 1. During beforeUpdate, any updated components will be added to the
+    //    dirty_components array and will cause a reentrant call to flush(). Because
+    //    the flush index is kept outside the function, the reentrant call will pick
+    //    up where the earlier call left off and go through all dirty components. The
+    //    current_component value is saved and restored so that the reentrant call will
+    //    not interfere with the "parent" flush() call.
+    // 2. bind:this callbacks cannot trigger new flush() calls.
+    // 3. During afterUpdate, any updated components will NOT have their afterUpdate
+    //    callback called a second time; the seen_callbacks set, outside the flush()
+    //    function, guarantees this behavior.
     const seen_callbacks = new Set();
+    let flushidx = 0; // Do *not* move this inside the flush() function
     function flush() {
-        if (flushing)
-            return;
-        flushing = true;
+        const saved_component = current_component;
         do {
             // first, call beforeUpdate functions
             // and update components
-            for (let i = 0; i < dirty_components.length; i += 1) {
-                const component = dirty_components[i];
+            while (flushidx < dirty_components.length) {
+                const component = dirty_components[flushidx];
+                flushidx++;
                 set_current_component(component);
                 update(component.$$);
             }
             set_current_component(null);
             dirty_components.length = 0;
+            flushidx = 0;
             while (binding_callbacks.length)
                 binding_callbacks.pop()();
             // then, once components are updated, call
@@ -159,8 +182,8 @@ var app = (function () {
             flush_callbacks.pop()();
         }
         update_scheduled = false;
-        flushing = false;
         seen_callbacks.clear();
+        set_current_component(saved_component);
     }
     function update($$) {
         if ($$.fragment !== null) {
@@ -195,6 +218,9 @@ var app = (function () {
             });
             block.o(local);
         }
+        else if (callback) {
+            callback();
+        }
     }
 
     const globals = (typeof window !== 'undefined'
@@ -213,22 +239,27 @@ var app = (function () {
     function create_component(block) {
         block && block.c();
     }
-    function mount_component(component, target, anchor) {
-        const { fragment, on_mount, on_destroy, after_update } = component.$$;
+    function mount_component(component, target, anchor, customElement) {
+        const { fragment, after_update } = component.$$;
         fragment && fragment.m(target, anchor);
-        // onMount happens before the initial afterUpdate
-        add_render_callback(() => {
-            const new_on_destroy = on_mount.map(run).filter(is_function);
-            if (on_destroy) {
-                on_destroy.push(...new_on_destroy);
-            }
-            else {
-                // Edge case - component was destroyed immediately,
-                // most likely as a result of a binding initialising
-                run_all(new_on_destroy);
-            }
-            component.$$.on_mount = [];
-        });
+        if (!customElement) {
+            // onMount happens before the initial afterUpdate
+            add_render_callback(() => {
+                const new_on_destroy = component.$$.on_mount.map(run).filter(is_function);
+                // if the component was destroyed immediately
+                // it will update the `$$.on_destroy` reference to `null`.
+                // the destructured on_destroy may still reference to the old array
+                if (component.$$.on_destroy) {
+                    component.$$.on_destroy.push(...new_on_destroy);
+                }
+                else {
+                    // Edge case - component was destroyed immediately,
+                    // most likely as a result of a binding initialising
+                    run_all(new_on_destroy);
+                }
+                component.$$.on_mount = [];
+            });
+        }
         after_update.forEach(add_render_callback);
     }
     function destroy_component(component, detaching) {
@@ -250,13 +281,12 @@ var app = (function () {
         }
         component.$$.dirty[(i / 31) | 0] |= (1 << (i % 31));
     }
-    function init(component, options, instance, create_fragment, not_equal, props, dirty = [-1]) {
+    function init(component, options, instance, create_fragment, not_equal, props, append_styles, dirty = [-1]) {
         const parent_component = current_component;
         set_current_component(component);
-        const prop_values = options.props || {};
         const $$ = component.$$ = {
             fragment: null,
-            ctx: null,
+            ctx: [],
             // state
             props,
             update: noop,
@@ -265,17 +295,20 @@ var app = (function () {
             // lifecycle
             on_mount: [],
             on_destroy: [],
+            on_disconnect: [],
             before_update: [],
             after_update: [],
-            context: new Map(parent_component ? parent_component.$$.context : []),
+            context: new Map(options.context || (parent_component ? parent_component.$$.context : [])),
             // everything else
             callbacks: blank_object(),
             dirty,
-            skip_bound: false
+            skip_bound: false,
+            root: options.target || parent_component.$$.root
         };
+        append_styles && append_styles($$.root);
         let ready = false;
         $$.ctx = instance
-            ? instance(component, prop_values, (i, ret, ...rest) => {
+            ? instance(component, options.props || {}, (i, ret, ...rest) => {
                 const value = rest.length ? rest[0] : ret;
                 if ($$.ctx && not_equal($$.ctx[i], $$.ctx[i] = value)) {
                     if (!$$.skip_bound && $$.bound[i])
@@ -304,17 +337,23 @@ var app = (function () {
             }
             if (options.intro)
                 transition_in(component.$$.fragment);
-            mount_component(component, options.target, options.anchor);
+            mount_component(component, options.target, options.anchor, options.customElement);
             flush();
         }
         set_current_component(parent_component);
     }
+    /**
+     * Base class for Svelte components. Used when dev=false.
+     */
     class SvelteComponent {
         $destroy() {
             destroy_component(this, 1);
             this.$destroy = noop;
         }
         $on(type, callback) {
+            if (!is_function(callback)) {
+                return noop;
+            }
             const callbacks = (this.$$.callbacks[type] || (this.$$.callbacks[type] = []));
             callbacks.push(callback);
             return () => {
@@ -333,45 +372,45 @@ var app = (function () {
     }
 
     function dispatch_dev(type, detail) {
-        document.dispatchEvent(custom_event(type, Object.assign({ version: '3.25.1' }, detail)));
+        document.dispatchEvent(custom_event(type, Object.assign({ version: '3.52.0' }, detail), { bubbles: true }));
     }
     function append_dev(target, node) {
-        dispatch_dev("SvelteDOMInsert", { target, node });
+        dispatch_dev('SvelteDOMInsert', { target, node });
         append(target, node);
     }
     function insert_dev(target, node, anchor) {
-        dispatch_dev("SvelteDOMInsert", { target, node, anchor });
+        dispatch_dev('SvelteDOMInsert', { target, node, anchor });
         insert(target, node, anchor);
     }
     function detach_dev(node) {
-        dispatch_dev("SvelteDOMRemove", { node });
+        dispatch_dev('SvelteDOMRemove', { node });
         detach(node);
     }
     function listen_dev(node, event, handler, options, has_prevent_default, has_stop_propagation) {
-        const modifiers = options === true ? ["capture"] : options ? Array.from(Object.keys(options)) : [];
+        const modifiers = options === true ? ['capture'] : options ? Array.from(Object.keys(options)) : [];
         if (has_prevent_default)
             modifiers.push('preventDefault');
         if (has_stop_propagation)
             modifiers.push('stopPropagation');
-        dispatch_dev("SvelteDOMAddEventListener", { node, event, handler, modifiers });
+        dispatch_dev('SvelteDOMAddEventListener', { node, event, handler, modifiers });
         const dispose = listen(node, event, handler, options);
         return () => {
-            dispatch_dev("SvelteDOMRemoveEventListener", { node, event, handler, modifiers });
+            dispatch_dev('SvelteDOMRemoveEventListener', { node, event, handler, modifiers });
             dispose();
         };
     }
     function attr_dev(node, attribute, value) {
         attr(node, attribute, value);
         if (value == null)
-            dispatch_dev("SvelteDOMRemoveAttribute", { node, attribute });
+            dispatch_dev('SvelteDOMRemoveAttribute', { node, attribute });
         else
-            dispatch_dev("SvelteDOMSetAttribute", { node, attribute, value });
+            dispatch_dev('SvelteDOMSetAttribute', { node, attribute, value });
     }
     function set_data_dev(text, data) {
         data = '' + data;
         if (text.wholeText === data)
             return;
-        dispatch_dev("SvelteDOMSetData", { node: text, data });
+        dispatch_dev('SvelteDOMSetData', { node: text, data });
         text.data = data;
     }
     function validate_slots(name, slot, keys) {
@@ -381,29 +420,32 @@ var app = (function () {
             }
         }
     }
+    /**
+     * Base class for Svelte components with some minor dev-enhancements. Used when dev=true.
+     */
     class SvelteComponentDev extends SvelteComponent {
         constructor(options) {
             if (!options || (!options.target && !options.$$inline)) {
-                throw new Error(`'target' is a required option`);
+                throw new Error("'target' is a required option");
             }
             super();
         }
         $destroy() {
             super.$destroy();
             this.$destroy = () => {
-                console.warn(`Component was already destroyed`); // eslint-disable-line no-console
+                console.warn('Component was already destroyed'); // eslint-disable-line no-console
             };
         }
         $capture_state() { }
         $inject_state() { }
     }
 
-    /* src\components\options.svelte generated by Svelte v3.25.1 */
+    /* src/components/options.svelte generated by Svelte v3.52.0 */
 
-    const { console: console_1 } = globals;
-    const file = "src\\components\\options.svelte";
+    const { console: console_1$2 } = globals;
+    const file$3 = "src/components/options.svelte";
 
-    function create_fragment(ctx) {
+    function create_fragment$3(ctx) {
     	let div12;
     	let div0;
     	let t0;
@@ -441,9 +483,7 @@ var app = (function () {
     	let t20;
     	let select;
     	let option0;
-    	let option0_value_value;
     	let option1;
-    	let option1_value_value;
     	let t23;
     	let div7;
     	let span4;
@@ -462,6 +502,11 @@ var app = (function () {
     	let span6;
     	let t33;
     	let input6;
+    	let t34;
+    	let span7;
+    	let t35;
+    	let code;
+    	let t36;
     	let mounted;
     	let dispose;
 
@@ -537,79 +582,86 @@ var app = (function () {
     			span6.textContent = "Volume hide timeout";
     			t33 = space();
     			input6 = element("input");
-    			attr_dev(div0, "class", "bg svelte-1895ym0");
+    			t34 = space();
+    			span7 = element("span");
+    			t35 = text("Osu folder used: ");
+    			code = element("code");
+    			t36 = text(/*osuFolder*/ ctx[2]);
+    			attr_dev(div0, "class", "bg svelte-1h7gt2z");
     			toggle_class(div0, "visible", /*visible*/ ctx[1]);
-    			add_location(div0, file, 8, 4, 140);
-    			add_location(h2, file, 10, 8, 264);
-    			add_location(h30, file, 13, 12, 325);
-    			add_location(span0, file, 15, 16, 391);
+    			add_location(div0, file$3, 9, 4, 158);
+    			add_location(h2, file$3, 11, 8, 280);
+    			add_location(h30, file$3, 14, 12, 338);
+    			add_location(span0, file$3, 16, 16, 402);
     			attr_dev(input0, "type", "checkbox");
-    			add_location(input0, file, 16, 16, 437);
+    			add_location(input0, file$3, 17, 16, 447);
     			attr_dev(div1, "class", "row");
-    			add_location(div1, file, 14, 12, 356);
-    			add_location(span1, file, 19, 16, 608);
+    			add_location(div1, file$3, 15, 12, 368);
+    			add_location(span1, file$3, 20, 16, 615);
     			attr_dev(input1, "type", "range");
     			attr_dev(input1, "min", "1");
     			attr_dev(input1, "max", "30");
-    			add_location(input1, file, 20, 16, 656);
+    			add_location(input1, file$3, 21, 16, 662);
     			attr_dev(div2, "class", "row");
     			toggle_class(div2, "enabled", /*config*/ ctx[0].parallax.enabled);
-    			add_location(div2, file, 18, 12, 533);
+    			add_location(div2, file$3, 19, 12, 541);
     			attr_dev(div3, "class", "group");
-    			add_location(div3, file, 12, 8, 292);
-    			add_location(h31, file, 24, 12, 810);
-    			add_location(span2, file, 26, 16, 880);
+    			add_location(div3, file$3, 13, 8, 306);
+    			add_location(h31, file$3, 25, 12, 812);
+    			add_location(span2, file$3, 27, 16, 880);
     			attr_dev(input2, "type", "checkbox");
-    			add_location(input2, file, 27, 16, 932);
+    			add_location(input2, file$3, 28, 16, 931);
     			attr_dev(div4, "class", "row");
-    			add_location(div4, file, 25, 12, 845);
-    			add_location(span3, file, 30, 16, 1050);
+    			add_location(div4, file$3, 26, 12, 846);
+    			add_location(span3, file$3, 31, 16, 1046);
     			attr_dev(input3, "type", "checkbox");
-    			add_location(input3, file, 31, 16, 1116);
+    			add_location(input3, file$3, 32, 16, 1111);
     			attr_dev(div5, "class", "row");
-    			add_location(div5, file, 29, 12, 1015);
+    			add_location(div5, file$3, 30, 12, 1012);
     			attr_dev(div6, "class", "group");
-    			add_location(div6, file, 23, 8, 777);
-    			add_location(h32, file, 35, 12, 1253);
-    			option0.__value = option0_value_value = 0;
+    			add_location(div6, file$3, 24, 8, 780);
+    			add_location(h32, file$3, 36, 12, 1244);
+    			option0.__value = 0;
     			option0.value = option0.__value;
-    			add_location(option0, file, 37, 16, 1345);
-    			option1.__value = option1_value_value = 1;
+    			add_location(option0, file$3, 38, 16, 1334);
+    			option1.__value = 1;
     			option1.value = option1.__value;
-    			add_location(option1, file, 38, 16, 1404);
-    			if (/*config*/ ctx[0].backgrounds === void 0) add_render_callback(() => /*select_change_handler*/ ctx[7].call(select));
-    			add_location(select, file, 36, 12, 1287);
-    			add_location(span4, file, 41, 16, 1521);
+    			add_location(option1, file$3, 39, 16, 1392);
+    			if (/*config*/ ctx[0].backgrounds === void 0) add_render_callback(() => /*select_change_handler*/ ctx[8].call(select));
+    			add_location(select, file$3, 37, 12, 1277);
+    			add_location(span4, file$3, 42, 16, 1506);
     			attr_dev(input4, "type", "checkbox");
-    			add_location(input4, file, 42, 16, 1569);
+    			add_location(input4, file$3, 43, 16, 1553);
     			attr_dev(div7, "class", "row");
-    			add_location(div7, file, 40, 12, 1486);
+    			add_location(div7, file$3, 41, 12, 1472);
     			attr_dev(div8, "class", "group");
-    			add_location(div8, file, 34, 8, 1220);
-    			add_location(h33, file, 46, 12, 1709);
-    			add_location(span5, file, 48, 16, 1769);
+    			add_location(div8, file$3, 35, 8, 1212);
+    			add_location(h33, file$3, 47, 12, 1689);
+    			add_location(span5, file$3, 49, 16, 1747);
     			attr_dev(input5, "type", "range");
     			attr_dev(input5, "min", "1000");
     			attr_dev(input5, "max", "15000");
     			attr_dev(input5, "step", "500");
-    			add_location(input5, file, 49, 16, 1822);
+    			add_location(input5, file$3, 50, 16, 1799);
     			attr_dev(div9, "class", "row");
-    			add_location(div9, file, 47, 12, 1734);
-    			add_location(span6, file, 52, 16, 1979);
+    			add_location(div9, file$3, 48, 12, 1713);
+    			add_location(span6, file$3, 53, 16, 1953);
     			attr_dev(input6, "type", "range");
     			attr_dev(input6, "min", "1000");
     			attr_dev(input6, "max", "15000");
     			attr_dev(input6, "step", "500");
-    			add_location(input6, file, 53, 16, 2029);
+    			add_location(input6, file$3, 54, 16, 2002);
     			attr_dev(div10, "class", "row");
-    			add_location(div10, file, 51, 12, 1944);
+    			add_location(div10, file$3, 52, 12, 1919);
     			attr_dev(div11, "class", "group");
-    			add_location(div11, file, 45, 8, 1676);
-    			attr_dev(nav, "class", "svelte-1895ym0");
+    			add_location(div11, file$3, 46, 8, 1657);
+    			add_location(code, file$3, 57, 31, 2158);
+    			add_location(span7, file$3, 57, 8, 2135);
+    			attr_dev(nav, "class", "svelte-1h7gt2z");
     			toggle_class(nav, "visible", /*visible*/ ctx[1]);
-    			add_location(nav, file, 9, 4, 225);
+    			add_location(nav, file$3, 10, 4, 242);
     			attr_dev(div12, "class", "options");
-    			add_location(div12, file, 7, 0, 113);
+    			add_location(div12, file$3, 8, 0, 132);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
@@ -679,21 +731,26 @@ var app = (function () {
     			append_dev(div10, t33);
     			append_dev(div10, input6);
     			set_input_value(input6, /*config*/ ctx[0].autohide.volume);
+    			append_dev(nav, t34);
+    			append_dev(nav, span7);
+    			append_dev(span7, t35);
+    			append_dev(span7, code);
+    			append_dev(code, t36);
 
     			if (!mounted) {
     				dispose = [
-    					listen_dev(div0, "click", /*click_handler*/ ctx[2], false, false, false),
-    					listen_dev(input0, "change", /*input0_change_handler*/ ctx[3]),
-    					listen_dev(input1, "change", /*input1_change_input_handler*/ ctx[4]),
-    					listen_dev(input1, "input", /*input1_change_input_handler*/ ctx[4]),
-    					listen_dev(input2, "change", /*input2_change_handler*/ ctx[5]),
-    					listen_dev(input3, "change", /*input3_change_handler*/ ctx[6]),
-    					listen_dev(select, "change", /*select_change_handler*/ ctx[7]),
-    					listen_dev(input4, "change", /*input4_change_handler*/ ctx[8]),
-    					listen_dev(input5, "change", /*input5_change_input_handler*/ ctx[9]),
-    					listen_dev(input5, "input", /*input5_change_input_handler*/ ctx[9]),
-    					listen_dev(input6, "change", /*input6_change_input_handler*/ ctx[10]),
-    					listen_dev(input6, "input", /*input6_change_input_handler*/ ctx[10])
+    					listen_dev(div0, "click", /*click_handler*/ ctx[3], false, false, false),
+    					listen_dev(input0, "change", /*input0_change_handler*/ ctx[4]),
+    					listen_dev(input1, "change", /*input1_change_input_handler*/ ctx[5]),
+    					listen_dev(input1, "input", /*input1_change_input_handler*/ ctx[5]),
+    					listen_dev(input2, "change", /*input2_change_handler*/ ctx[6]),
+    					listen_dev(input3, "change", /*input3_change_handler*/ ctx[7]),
+    					listen_dev(select, "change", /*select_change_handler*/ ctx[8]),
+    					listen_dev(input4, "change", /*input4_change_handler*/ ctx[9]),
+    					listen_dev(input5, "change", /*input5_change_input_handler*/ ctx[10]),
+    					listen_dev(input5, "input", /*input5_change_input_handler*/ ctx[10]),
+    					listen_dev(input6, "change", /*input6_change_input_handler*/ ctx[11]),
+    					listen_dev(input6, "input", /*input6_change_input_handler*/ ctx[11])
     				];
 
     				mounted = true;
@@ -740,6 +797,8 @@ var app = (function () {
     				set_input_value(input6, /*config*/ ctx[0].autohide.volume);
     			}
 
+    			if (dirty & /*osuFolder*/ 4) set_data_dev(t36, /*osuFolder*/ ctx[2]);
+
     			if (dirty & /*visible*/ 2) {
     				toggle_class(nav, "visible", /*visible*/ ctx[1]);
     			}
@@ -755,7 +814,7 @@ var app = (function () {
 
     	dispatch_dev("SvelteRegisterBlock", {
     		block,
-    		id: create_fragment.name,
+    		id: create_fragment$3.name,
     		type: "component",
     		source: "",
     		ctx
@@ -764,15 +823,31 @@ var app = (function () {
     	return block;
     }
 
-    function instance($$self, $$props, $$invalidate) {
+    function instance$3($$self, $$props, $$invalidate) {
     	let { $$slots: slots = {}, $$scope } = $$props;
-    	validate_slots("Options", slots, []);
-    	var { config } = $$props;
-    	var { visible } = $$props;
-    	const writable_props = ["config", "visible"];
+    	validate_slots('Options', slots, []);
+    	let { config } = $$props;
+    	let { visible } = $$props;
+    	let { osuFolder } = $$props;
+
+    	$$self.$$.on_mount.push(function () {
+    		if (config === undefined && !('config' in $$props || $$self.$$.bound[$$self.$$.props['config']])) {
+    			console_1$2.warn("<Options> was created without expected prop 'config'");
+    		}
+
+    		if (visible === undefined && !('visible' in $$props || $$self.$$.bound[$$self.$$.props['visible']])) {
+    			console_1$2.warn("<Options> was created without expected prop 'visible'");
+    		}
+
+    		if (osuFolder === undefined && !('osuFolder' in $$props || $$self.$$.bound[$$self.$$.props['osuFolder']])) {
+    			console_1$2.warn("<Options> was created without expected prop 'osuFolder'");
+    		}
+    	});
+
+    	const writable_props = ['config', 'visible', 'osuFolder'];
 
     	Object.keys($$props).forEach(key => {
-    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== "$$") console_1.warn(`<Options> was created with unknown prop '${key}'`);
+    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console_1$2.warn(`<Options> was created with unknown prop '${key}'`);
     	});
 
     	const click_handler = () => $$invalidate(1, visible = false);
@@ -818,15 +893,17 @@ var app = (function () {
     	}
 
     	$$self.$$set = $$props => {
-    		if ("config" in $$props) $$invalidate(0, config = $$props.config);
-    		if ("visible" in $$props) $$invalidate(1, visible = $$props.visible);
+    		if ('config' in $$props) $$invalidate(0, config = $$props.config);
+    		if ('visible' in $$props) $$invalidate(1, visible = $$props.visible);
+    		if ('osuFolder' in $$props) $$invalidate(2, osuFolder = $$props.osuFolder);
     	};
 
-    	$$self.$capture_state = () => ({ config, visible });
+    	$$self.$capture_state = () => ({ config, visible, osuFolder });
 
     	$$self.$inject_state = $$props => {
-    		if ("config" in $$props) $$invalidate(0, config = $$props.config);
-    		if ("visible" in $$props) $$invalidate(1, visible = $$props.visible);
+    		if ('config' in $$props) $$invalidate(0, config = $$props.config);
+    		if ('visible' in $$props) $$invalidate(1, visible = $$props.visible);
+    		if ('osuFolder' in $$props) $$invalidate(2, osuFolder = $$props.osuFolder);
     	};
 
     	if ($$props && "$$inject" in $$props) {
@@ -835,13 +912,14 @@ var app = (function () {
 
     	$$self.$$.update = () => {
     		if ($$self.$$.dirty & /*config*/ 1) {
-    			 console.log("Config", config);
+    			console.log("Config", config);
     		}
     	};
 
     	return [
     		config,
     		visible,
+    		osuFolder,
     		click_handler,
     		input0_change_handler,
     		input1_change_input_handler,
@@ -857,25 +935,14 @@ var app = (function () {
     class Options extends SvelteComponentDev {
     	constructor(options) {
     		super(options);
-    		init(this, options, instance, create_fragment, safe_not_equal, { config: 0, visible: 1 });
+    		init(this, options, instance$3, create_fragment$3, safe_not_equal, { config: 0, visible: 1, osuFolder: 2 });
 
     		dispatch_dev("SvelteRegisterComponent", {
     			component: this,
     			tagName: "Options",
     			options,
-    			id: create_fragment.name
+    			id: create_fragment$3.name
     		});
-
-    		const { ctx } = this.$$;
-    		const props = options.props || {};
-
-    		if (/*config*/ ctx[0] === undefined && !("config" in props)) {
-    			console_1.warn("<Options> was created without expected prop 'config'");
-    		}
-
-    		if (/*visible*/ ctx[1] === undefined && !("visible" in props)) {
-    			console_1.warn("<Options> was created without expected prop 'visible'");
-    		}
     	}
 
     	get config() {
@@ -893,14 +960,22 @@ var app = (function () {
     	set visible(value) {
     		throw new Error("<Options>: Props cannot be set directly on the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
     	}
+
+    	get osuFolder() {
+    		throw new Error("<Options>: Props cannot be read directly from the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+    	}
+
+    	set osuFolder(value) {
+    		throw new Error("<Options>: Props cannot be set directly on the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+    	}
     }
 
-    /* src\Menu.svelte generated by Svelte v3.25.1 */
+    /* src/Menu.svelte generated by Svelte v3.52.0 */
 
-    const { console: console_1$1, window: window_1 } = globals;
-    const file$1 = "src\\Menu.svelte";
+    const { console: console_1$1, window: window_1$1 } = globals;
+    const file$2 = "src/Menu.svelte";
 
-    // (146:4) {#if now - last < config.autohide.info + 1000}
+    // (145:4) {#if now - last < config.autohide.info + 1000}
     function create_if_block_1(ctx) {
     	let div;
     	let if_block = /*song*/ ctx[0] && create_if_block_2(ctx);
@@ -910,8 +985,8 @@ var app = (function () {
     			div = element("div");
     			if (if_block) if_block.c();
     			attr_dev(div, "class", "info svelte-1qt5obi");
-    			toggle_class(div, "hidden", /*now*/ ctx[5] - /*last*/ ctx[2] > /*config*/ ctx[1].autohide.info);
-    			add_location(div, file$1, 146, 8, 4944);
+    			toggle_class(div, "hidden", /*now*/ ctx[6] - /*last*/ ctx[3] > /*config*/ ctx[1].autohide.info);
+    			add_location(div, file$2, 145, 8, 4661);
     		},
     		m: function mount(target, anchor) {
     			insert_dev(target, div, anchor);
@@ -931,8 +1006,8 @@ var app = (function () {
     				if_block = null;
     			}
 
-    			if (dirty & /*now, last, config*/ 38) {
-    				toggle_class(div, "hidden", /*now*/ ctx[5] - /*last*/ ctx[2] > /*config*/ ctx[1].autohide.info);
+    			if (dirty & /*now, last, config*/ 74) {
+    				toggle_class(div, "hidden", /*now*/ ctx[6] - /*last*/ ctx[3] > /*config*/ ctx[1].autohide.info);
     			}
     		},
     		d: function destroy(detaching) {
@@ -945,14 +1020,14 @@ var app = (function () {
     		block,
     		id: create_if_block_1.name,
     		type: "if",
-    		source: "(146:4) {#if now - last < config.autohide.info + 1000}",
+    		source: "(145:4) {#if now - last < config.autohide.info + 1000}",
     		ctx
     	});
 
     	return block;
     }
 
-    // (148:12) {#if song}
+    // (147:12) {#if song}
     function create_if_block_2(ctx) {
     	let div4;
     	let h2;
@@ -997,32 +1072,32 @@ var app = (function () {
     			div2 = element("div");
     			img2 = element("img");
     			attr_dev(h2, "class", "svelte-1qt5obi");
-    			add_location(h2, file$1, 149, 20, 5093);
-    			if (img0.src !== (img0_src_value = "images/music_" + (/*song*/ ctx[0].playing ? "pause" : "play") + ".svg")) attr_dev(img0, "src", img0_src_value);
+    			add_location(h2, file$2, 148, 20, 4807);
+    			if (!src_url_equal(img0.src, img0_src_value = "images/music_" + (/*song*/ ctx[0].playing ? "pause" : "play") + ".svg")) attr_dev(img0, "src", img0_src_value);
     			attr_dev(img0, "alt", img0_alt_value = "" + ((/*song*/ ctx[0].playing ? "Pause" : "Play") + " music"));
     			attr_dev(img0, "title", img0_title_value = "" + ((/*song*/ ctx[0].playing ? "Pause" : "Play") + " music"));
     			attr_dev(img0, "class", "svelte-1qt5obi");
-    			add_location(img0, file$1, 152, 28, 5269);
+    			add_location(img0, file$2, 151, 28, 4980);
     			attr_dev(div0, "class", "play svelte-1qt5obi");
-    			add_location(div0, file$1, 151, 24, 5199);
-    			if (img1.src !== (img1_src_value = "images/music_forward.svg")) attr_dev(img1, "src", img1_src_value);
+    			add_location(div0, file$2, 150, 24, 4911);
+    			if (!src_url_equal(img1.src, img1_src_value = "images/music_forward.svg")) attr_dev(img1, "src", img1_src_value);
     			attr_dev(img1, "alt", "Skip the song");
     			attr_dev(img1, "title", "Skip the song");
     			attr_dev(img1, "class", "svelte-1qt5obi");
-    			add_location(img1, file$1, 155, 28, 5554);
+    			add_location(img1, file$2, 154, 28, 5262);
     			attr_dev(div1, "class", "forward svelte-1qt5obi");
-    			add_location(div1, file$1, 154, 24, 5483);
-    			if (img2.src !== (img2_src_value = "images/settings.svg")) attr_dev(img2, "src", img2_src_value);
+    			add_location(div1, file$2, 153, 24, 5192);
+    			if (!src_url_equal(img2.src, img2_src_value = "images/settings.svg")) attr_dev(img2, "src", img2_src_value);
     			attr_dev(img2, "alt", "Settings");
     			attr_dev(img2, "title", "Open settings");
     			attr_dev(img2, "class", "svelte-1qt5obi");
-    			add_location(img2, file$1, 158, 28, 5788);
+    			add_location(img2, file$2, 157, 28, 5493);
     			attr_dev(div2, "class", "settings svelte-1qt5obi");
-    			add_location(div2, file$1, 157, 24, 5690);
+    			add_location(div2, file$2, 156, 24, 5396);
     			attr_dev(div3, "class", "controls svelte-1qt5obi");
-    			add_location(div3, file$1, 150, 20, 5151);
+    			add_location(div3, file$2, 149, 20, 4864);
     			attr_dev(div4, "class", "song svelte-1qt5obi");
-    			add_location(div4, file$1, 148, 16, 5053);
+    			add_location(div4, file$2, 147, 16, 4768);
     		},
     		m: function mount(target, anchor) {
     			insert_dev(target, div4, anchor);
@@ -1043,9 +1118,9 @@ var app = (function () {
 
     			if (!mounted) {
     				dispose = [
-    					listen_dev(div0, "click", /*togglePlay*/ ctx[7], false, false, false),
-    					listen_dev(div1, "click", /*playNext*/ ctx[6], false, false, false),
-    					listen_dev(div2, "click", /*click_handler*/ ctx[12], false, false, false)
+    					listen_dev(div0, "click", /*togglePlay*/ ctx[8], false, false, false),
+    					listen_dev(div1, "click", /*playNext*/ ctx[7], false, false, false),
+    					listen_dev(div2, "click", /*click_handler*/ ctx[14], false, false, false)
     				];
 
     				mounted = true;
@@ -1055,7 +1130,7 @@ var app = (function () {
     			if (dirty & /*song*/ 1 && t0_value !== (t0_value = /*song*/ ctx[0].artist + "")) set_data_dev(t0, t0_value);
     			if (dirty & /*song*/ 1 && t2_value !== (t2_value = /*song*/ ctx[0].song + "")) set_data_dev(t2, t2_value);
 
-    			if (dirty & /*song*/ 1 && img0.src !== (img0_src_value = "images/music_" + (/*song*/ ctx[0].playing ? "pause" : "play") + ".svg")) {
+    			if (dirty & /*song*/ 1 && !src_url_equal(img0.src, img0_src_value = "images/music_" + (/*song*/ ctx[0].playing ? "pause" : "play") + ".svg")) {
     				attr_dev(img0, "src", img0_src_value);
     			}
 
@@ -1078,15 +1153,15 @@ var app = (function () {
     		block,
     		id: create_if_block_2.name,
     		type: "if",
-    		source: "(148:12) {#if song}",
+    		source: "(147:12) {#if song}",
     		ctx
     	});
 
     	return block;
     }
 
-    // (166:4) {#if now - lastVolumeUpdate < config.autohide.volume + 1000 && song && song.audio}
-    function create_if_block(ctx) {
+    // (165:4) {#if now - lastVolumeUpdate < config.autohide.volume + 1000 && song && song.audio}
+    function create_if_block$1(ctx) {
     	let div2;
     	let div1;
     	let div0;
@@ -1096,11 +1171,7 @@ var app = (function () {
     	let t2;
     	let svg;
     	let circle;
-    	let circle_stroke_dasharray_value;
     	let circle_stroke_dashoffset_value;
-    	let circle_r_value;
-    	let circle_cx_value;
-    	let circle_cy_value;
 
     	const block = {
     		c: function create() {
@@ -1113,26 +1184,26 @@ var app = (function () {
     			svg = svg_element("svg");
     			circle = svg_element("circle");
     			attr_dev(div0, "class", "percent svelte-1qt5obi");
-    			add_location(div0, file$1, 168, 16, 6219);
+    			add_location(div0, file$2, 167, 16, 5914);
     			attr_dev(circle, "stroke-width", volumeStroke);
     			attr_dev(circle, "fill", "transparent");
     			attr_dev(circle, "stroke", "blue");
-    			attr_dev(circle, "stroke-dasharray", circle_stroke_dasharray_value = volumeRadius * 2 * Math.PI + " " + volumeRadius * 2 * Math.PI);
+    			attr_dev(circle, "stroke-dasharray", volumeRadius * 2 * Math.PI + " " + volumeRadius * 2 * Math.PI);
     			attr_dev(circle, "stroke-dashoffset", circle_stroke_dashoffset_value = volumeRadius * 2 * Math.PI - /*song*/ ctx[0].audio.volume * volumeRadius * 2 * Math.PI);
-    			attr_dev(circle, "r", circle_r_value = volumeRadius - 1);
-    			attr_dev(circle, "cx", circle_cx_value = volumeRadius - 1);
-    			attr_dev(circle, "cy", circle_cy_value = volumeRadius + 1);
+    			attr_dev(circle, "r", volumeRadius - 1);
+    			attr_dev(circle, "cx", volumeRadius - 1);
+    			attr_dev(circle, "cy", volumeRadius + 1);
     			attr_dev(circle, "class", "svelte-1qt5obi");
-    			add_location(circle, file$1, 172, 20, 6432);
+    			add_location(circle, file$2, 171, 20, 6123);
     			attr_dev(svg, "class", "progress-ring svelte-1qt5obi");
     			attr_dev(svg, "width", volumeWidth);
     			attr_dev(svg, "height", volumeWidth);
-    			add_location(svg, file$1, 171, 16, 6342);
+    			add_location(svg, file$2, 170, 16, 6034);
     			attr_dev(div1, "class", "slider svelte-1qt5obi");
-    			add_location(div1, file$1, 167, 12, 6181);
+    			add_location(div1, file$2, 166, 12, 5877);
     			attr_dev(div2, "class", "volume svelte-1qt5obi");
-    			toggle_class(div2, "hidden", /*now*/ ctx[5] - /*lastVolumeUpdate*/ ctx[3] > /*config*/ ctx[1].autohide.volume);
-    			add_location(div2, file$1, 166, 8, 6084);
+    			toggle_class(div2, "hidden", /*now*/ ctx[6] - /*lastVolumeUpdate*/ ctx[4] > /*config*/ ctx[1].autohide.volume);
+    			add_location(div2, file$2, 165, 8, 5781);
     		},
     		m: function mount(target, anchor) {
     			insert_dev(target, div2, anchor);
@@ -1151,8 +1222,8 @@ var app = (function () {
     				attr_dev(circle, "stroke-dashoffset", circle_stroke_dashoffset_value);
     			}
 
-    			if (dirty & /*now, lastVolumeUpdate, config*/ 42) {
-    				toggle_class(div2, "hidden", /*now*/ ctx[5] - /*lastVolumeUpdate*/ ctx[3] > /*config*/ ctx[1].autohide.volume);
+    			if (dirty & /*now, lastVolumeUpdate, config*/ 82) {
+    				toggle_class(div2, "hidden", /*now*/ ctx[6] - /*lastVolumeUpdate*/ ctx[4] > /*config*/ ctx[1].autohide.volume);
     			}
     		},
     		d: function destroy(detaching) {
@@ -1162,16 +1233,16 @@ var app = (function () {
 
     	dispatch_dev("SvelteRegisterBlock", {
     		block,
-    		id: create_if_block.name,
+    		id: create_if_block$1.name,
     		type: "if",
-    		source: "(166:4) {#if now - lastVolumeUpdate < config.autohide.volume + 1000 && song && song.audio}",
+    		source: "(165:4) {#if now - lastVolumeUpdate < config.autohide.volume + 1000 && song && song.audio}",
     		ctx
     	});
 
     	return block;
     }
 
-    function create_fragment$1(ctx) {
+    function create_fragment$2(ctx) {
     	let div;
     	let t0;
     	let t1;
@@ -1181,30 +1252,30 @@ var app = (function () {
     	let current;
     	let mounted;
     	let dispose;
-    	let if_block0 = /*now*/ ctx[5] - /*last*/ ctx[2] < /*config*/ ctx[1].autohide.info + 1000 && create_if_block_1(ctx);
-    	let if_block1 = /*now*/ ctx[5] - /*lastVolumeUpdate*/ ctx[3] < /*config*/ ctx[1].autohide.volume + 1000 && /*song*/ ctx[0] && /*song*/ ctx[0].audio && create_if_block(ctx);
+    	let if_block0 = /*now*/ ctx[6] - /*last*/ ctx[3] < /*config*/ ctx[1].autohide.info + 1000 && create_if_block_1(ctx);
+    	let if_block1 = /*now*/ ctx[6] - /*lastVolumeUpdate*/ ctx[4] < /*config*/ ctx[1].autohide.volume + 1000 && /*song*/ ctx[0] && /*song*/ ctx[0].audio && create_if_block$1(ctx);
 
     	function options_config_binding(value) {
-    		/*options_config_binding*/ ctx[13].call(null, value);
+    		/*options_config_binding*/ ctx[15](value);
     	}
 
     	function options_visible_binding(value) {
-    		/*options_visible_binding*/ ctx[14].call(null, value);
+    		/*options_visible_binding*/ ctx[16](value);
     	}
 
-    	let options_props = {};
+    	let options_props = { osuFolder: /*osuFolder*/ ctx[2] };
 
     	if (/*config*/ ctx[1] !== void 0) {
     		options_props.config = /*config*/ ctx[1];
     	}
 
-    	if (/*settingsOpen*/ ctx[4] !== void 0) {
-    		options_props.visible = /*settingsOpen*/ ctx[4];
+    	if (/*settingsOpen*/ ctx[5] !== void 0) {
+    		options_props.visible = /*settingsOpen*/ ctx[5];
     	}
 
     	options = new Options({ props: options_props, $$inline: true });
-    	binding_callbacks.push(() => bind(options, "config", options_config_binding));
-    	binding_callbacks.push(() => bind(options, "visible", options_visible_binding));
+    	binding_callbacks.push(() => bind(options, 'config', options_config_binding));
+    	binding_callbacks.push(() => bind(options, 'visible', options_visible_binding));
 
     	const block = {
     		c: function create() {
@@ -1215,7 +1286,7 @@ var app = (function () {
     			t1 = space();
     			create_component(options.$$.fragment);
     			attr_dev(div, "class", "menu");
-    			add_location(div, file$1, 144, 0, 4864);
+    			add_location(div, file$2, 143, 0, 4583);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
@@ -1231,15 +1302,15 @@ var app = (function () {
 
     			if (!mounted) {
     				dispose = [
-    					listen_dev(window_1, "mousemove", /*mousemove_handler*/ ctx[10], false, false, false),
-    					listen_dev(window_1, "wheel", /*wheel_handler*/ ctx[11], false, false, false)
+    					listen_dev(window_1$1, "mousemove", /*mousemove_handler*/ ctx[12], false, false, false),
+    					listen_dev(window_1$1, "wheel", /*wheel_handler*/ ctx[13], false, false, false)
     				];
 
     				mounted = true;
     			}
     		},
     		p: function update(ctx, [dirty]) {
-    			if (/*now*/ ctx[5] - /*last*/ ctx[2] < /*config*/ ctx[1].autohide.info + 1000) {
+    			if (/*now*/ ctx[6] - /*last*/ ctx[3] < /*config*/ ctx[1].autohide.info + 1000) {
     				if (if_block0) {
     					if_block0.p(ctx, dirty);
     				} else {
@@ -1252,11 +1323,11 @@ var app = (function () {
     				if_block0 = null;
     			}
 
-    			if (/*now*/ ctx[5] - /*lastVolumeUpdate*/ ctx[3] < /*config*/ ctx[1].autohide.volume + 1000 && /*song*/ ctx[0] && /*song*/ ctx[0].audio) {
+    			if (/*now*/ ctx[6] - /*lastVolumeUpdate*/ ctx[4] < /*config*/ ctx[1].autohide.volume + 1000 && /*song*/ ctx[0] && /*song*/ ctx[0].audio) {
     				if (if_block1) {
     					if_block1.p(ctx, dirty);
     				} else {
-    					if_block1 = create_if_block(ctx);
+    					if_block1 = create_if_block$1(ctx);
     					if_block1.c();
     					if_block1.m(div, t1);
     				}
@@ -1266,6 +1337,7 @@ var app = (function () {
     			}
 
     			const options_changes = {};
+    			if (dirty & /*osuFolder*/ 4) options_changes.osuFolder = /*osuFolder*/ ctx[2];
 
     			if (!updating_config && dirty & /*config*/ 2) {
     				updating_config = true;
@@ -1273,9 +1345,9 @@ var app = (function () {
     				add_flush_callback(() => updating_config = false);
     			}
 
-    			if (!updating_visible && dirty & /*settingsOpen*/ 16) {
+    			if (!updating_visible && dirty & /*settingsOpen*/ 32) {
     				updating_visible = true;
-    				options_changes.visible = /*settingsOpen*/ ctx[4];
+    				options_changes.visible = /*settingsOpen*/ ctx[5];
     				add_flush_callback(() => updating_visible = false);
     			}
 
@@ -1302,7 +1374,7 @@ var app = (function () {
 
     	dispatch_dev("SvelteRegisterBlock", {
     		block,
-    		id: create_fragment$1.name,
+    		id: create_fragment$2.name,
     		type: "component",
     		source: "",
     		ctx
@@ -1315,14 +1387,13 @@ var app = (function () {
     const volumeStroke = 4;
     const volumeRadius = 50;
 
-    function instance$1($$self, $$props, $$invalidate) {
+    function instance$2($$self, $$props, $$invalidate) {
     	let { $$slots: slots = {}, $$scope } = $$props;
-    	validate_slots("Menu", slots, []);
-    	const fs = require("fs");
-    	const osuParser = require("./lib/osu-parser.js");
-    	var { osuData } = $$props;
-    	var { song } = $$props;
-    	var { config } = $$props;
+    	validate_slots('Menu', slots, []);
+    	let { osuData } = $$props;
+    	let { song } = $$props;
+    	let { config } = $$props;
+    	let { osuFolder } = $$props;
     	var last = Date.now();
     	var lastVolumeUpdate = Date.now() - 5000;
     	var settingsOpen = false;
@@ -1330,14 +1401,14 @@ var app = (function () {
 
     	setInterval(
     		() => {
-    			$$invalidate(5, now = Date.now());
+    			$$invalidate(6, now = Date.now());
     		},
     		800
     	);
 
     	function resetPool() {
     		if (!osuData.songs) return false;
-    		$$invalidate(9, osuData.songPool = osuData.songs.filter(v => true), osuData);
+    		$$invalidate(10, osuData.songPool = osuData.songs.filter(v => true), osuData);
     		let a = osuData.songPool;
 
     		for (let i = a.length - 1; i > 0; i--) {
@@ -1383,9 +1454,9 @@ var app = (function () {
 
     	function updateVolume(e) {
     		if (!song || !song.audio || !e.altKey) return;
-    		$$invalidate(3, lastVolumeUpdate = Date.now());
-    		$$invalidate(15, volume += e.deltaY * -0.0005);
-    		$$invalidate(15, volume = Math.min(1, Math.max(volume, 0)));
+    		$$invalidate(4, lastVolumeUpdate = Date.now());
+    		$$invalidate(11, volume += e.deltaY * -0.0005);
+    		$$invalidate(11, volume = Math.min(1, Math.max(volume, 0)));
     	}
 
     	setTimeout(
@@ -1395,15 +1466,33 @@ var app = (function () {
     		200
     	);
 
-    	const writable_props = ["osuData", "song", "config"];
+    	$$self.$$.on_mount.push(function () {
+    		if (osuData === undefined && !('osuData' in $$props || $$self.$$.bound[$$self.$$.props['osuData']])) {
+    			console_1$1.warn("<Menu> was created without expected prop 'osuData'");
+    		}
 
-    	Object.keys($$props).forEach(key => {
-    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== "$$") console_1$1.warn(`<Menu> was created with unknown prop '${key}'`);
+    		if (song === undefined && !('song' in $$props || $$self.$$.bound[$$self.$$.props['song']])) {
+    			console_1$1.warn("<Menu> was created without expected prop 'song'");
+    		}
+
+    		if (config === undefined && !('config' in $$props || $$self.$$.bound[$$self.$$.props['config']])) {
+    			console_1$1.warn("<Menu> was created without expected prop 'config'");
+    		}
+
+    		if (osuFolder === undefined && !('osuFolder' in $$props || $$self.$$.bound[$$self.$$.props['osuFolder']])) {
+    			console_1$1.warn("<Menu> was created without expected prop 'osuFolder'");
+    		}
     	});
 
-    	const mousemove_handler = () => $$invalidate(2, last = Date.now());
+    	const writable_props = ['osuData', 'song', 'config', 'osuFolder'];
+
+    	Object.keys($$props).forEach(key => {
+    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console_1$1.warn(`<Menu> was created with unknown prop '${key}'`);
+    	});
+
+    	const mousemove_handler = () => $$invalidate(3, last = Date.now());
     	const wheel_handler = e => updateVolume(e);
-    	const click_handler = () => $$invalidate(4, settingsOpen = !settingsOpen);
+    	const click_handler = () => $$invalidate(5, settingsOpen = !settingsOpen);
 
     	function options_config_binding(value) {
     		config = value;
@@ -1412,22 +1501,22 @@ var app = (function () {
 
     	function options_visible_binding(value) {
     		settingsOpen = value;
-    		$$invalidate(4, settingsOpen);
+    		$$invalidate(5, settingsOpen);
     	}
 
     	$$self.$$set = $$props => {
-    		if ("osuData" in $$props) $$invalidate(9, osuData = $$props.osuData);
-    		if ("song" in $$props) $$invalidate(0, song = $$props.song);
-    		if ("config" in $$props) $$invalidate(1, config = $$props.config);
+    		if ('osuData' in $$props) $$invalidate(10, osuData = $$props.osuData);
+    		if ('song' in $$props) $$invalidate(0, song = $$props.song);
+    		if ('config' in $$props) $$invalidate(1, config = $$props.config);
+    		if ('osuFolder' in $$props) $$invalidate(2, osuFolder = $$props.osuFolder);
     	};
 
     	$$self.$capture_state = () => ({
     		Options,
-    		fs,
-    		osuParser,
     		osuData,
     		song,
     		config,
+    		osuFolder,
     		last,
     		lastVolumeUpdate,
     		settingsOpen,
@@ -1443,14 +1532,15 @@ var app = (function () {
     	});
 
     	$$self.$inject_state = $$props => {
-    		if ("osuData" in $$props) $$invalidate(9, osuData = $$props.osuData);
-    		if ("song" in $$props) $$invalidate(0, song = $$props.song);
-    		if ("config" in $$props) $$invalidate(1, config = $$props.config);
-    		if ("last" in $$props) $$invalidate(2, last = $$props.last);
-    		if ("lastVolumeUpdate" in $$props) $$invalidate(3, lastVolumeUpdate = $$props.lastVolumeUpdate);
-    		if ("settingsOpen" in $$props) $$invalidate(4, settingsOpen = $$props.settingsOpen);
-    		if ("now" in $$props) $$invalidate(5, now = $$props.now);
-    		if ("volume" in $$props) $$invalidate(15, volume = $$props.volume);
+    		if ('osuData' in $$props) $$invalidate(10, osuData = $$props.osuData);
+    		if ('song' in $$props) $$invalidate(0, song = $$props.song);
+    		if ('config' in $$props) $$invalidate(1, config = $$props.config);
+    		if ('osuFolder' in $$props) $$invalidate(2, osuFolder = $$props.osuFolder);
+    		if ('last' in $$props) $$invalidate(3, last = $$props.last);
+    		if ('lastVolumeUpdate' in $$props) $$invalidate(4, lastVolumeUpdate = $$props.lastVolumeUpdate);
+    		if ('settingsOpen' in $$props) $$invalidate(5, settingsOpen = $$props.settingsOpen);
+    		if ('now' in $$props) $$invalidate(6, now = $$props.now);
+    		if ('volume' in $$props) $$invalidate(11, volume = $$props.volume);
     	};
 
     	if ($$props && "$$inject" in $$props) {
@@ -1458,18 +1548,18 @@ var app = (function () {
     	}
 
     	$$self.$$.update = () => {
-    		if ($$self.$$.dirty & /*osuData*/ 512) {
-    			 resetPool(osuData.songs);
+    		if ($$self.$$.dirty & /*osuData*/ 1024) {
+    			resetPool(osuData.songs);
     		}
 
-    		if ($$self.$$.dirty & /*song, config*/ 3) {
-    			 {
+    		if ($$self.$$.dirty & /*song, osuFolder, config*/ 7) {
+    			{
     				(() => {
     					if (song && song.folder && !song.audio) {
     						// var audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     						// song.context = audioCtx;
     						// song.analyser = audioCtx.createAnalyser();
-    						$$invalidate(0, song.audio = new Audio(process.env.USERPROFILE + "/AppData/Local/osu!/Songs/" + song.folder + "/" + song.audioFile), song);
+    						$$invalidate(0, song.audio = new Audio(`${osuFolder}/Songs/${song.folder}/${song.audioFile}`), song);
 
     						// song.source = audioCtx.createMediaElementSource(song.audio);
     						// song.source.connect(song.analyser);
@@ -1502,26 +1592,30 @@ var app = (function () {
     							song
     						);
 
-    						if ("mediaSession" in navigator && config.mediaSession) {
+    						if ('mediaSession' in navigator && config.mediaSession) {
     							navigator.mediaSession.metadata = new MediaMetadata({
     									title: song.song,
     									artist: song.artist,
     									album: "Osu! visualizer",
-    									artwork: [], // { src: process.env.USERPROFILE + "/AppData/Local/osu!/Data/bt/" + song.id + ".jpg", type: 'image/jpeg' },
-    									
+    									artwork: [
+    										{
+    											src: `${osuFolder}/Data/bt/${song.id}.jpg`,
+    											type: 'image/jpeg'
+    										}
+    									]
     								});
 
-    							navigator.mediaSession.setActionHandler("play", function () {
+    							navigator.mediaSession.setActionHandler('play', function () {
     								$$invalidate(0, song.playing = true, song);
     								song.audio.play();
     							});
 
-    							navigator.mediaSession.setActionHandler("pause", function () {
+    							navigator.mediaSession.setActionHandler('pause', function () {
     								$$invalidate(0, song.playing = false, song);
     								song.audio.pause();
     							});
 
-    							navigator.mediaSession.setActionHandler("nexttrack", function () {
+    							navigator.mediaSession.setActionHandler('nexttrack', function () {
     								playNext();
     							});
     						}
@@ -1530,16 +1624,16 @@ var app = (function () {
     			}
     		}
 
-    		if ($$self.$$.dirty & /*song, volume*/ 32769) {
-    			 if (song.audio) $$invalidate(0, song.audio.volume = volume, song);
+    		if ($$self.$$.dirty & /*song, volume*/ 2049) {
+    			if (song.audio) $$invalidate(0, song.audio.volume = volume, song);
     		}
 
     		if ($$self.$$.dirty & /*song*/ 1) {
-    			 console.log(song);
+    			console.log(song);
     		}
 
     		if ($$self.$$.dirty & /*song, config*/ 3) {
-    			 if (song && song.audio && config.rpc) {
+    			if (song && song.audio && config.rpc) {
     				if (song.playing) {
     					window.songActivity = {
     						state: "Listening to osu! beatmaps",
@@ -1566,6 +1660,7 @@ var app = (function () {
     	return [
     		song,
     		config,
+    		osuFolder,
     		last,
     		lastVolumeUpdate,
     		settingsOpen,
@@ -1574,6 +1669,7 @@ var app = (function () {
     		togglePlay,
     		updateVolume,
     		osuData,
+    		volume,
     		mousemove_handler,
     		wheel_handler,
     		click_handler,
@@ -1585,29 +1681,20 @@ var app = (function () {
     class Menu extends SvelteComponentDev {
     	constructor(options) {
     		super(options);
-    		init(this, options, instance$1, create_fragment$1, safe_not_equal, { osuData: 9, song: 0, config: 1 });
+
+    		init(this, options, instance$2, create_fragment$2, safe_not_equal, {
+    			osuData: 10,
+    			song: 0,
+    			config: 1,
+    			osuFolder: 2
+    		});
 
     		dispatch_dev("SvelteRegisterComponent", {
     			component: this,
     			tagName: "Menu",
     			options,
-    			id: create_fragment$1.name
+    			id: create_fragment$2.name
     		});
-
-    		const { ctx } = this.$$;
-    		const props = options.props || {};
-
-    		if (/*osuData*/ ctx[9] === undefined && !("osuData" in props)) {
-    			console_1$1.warn("<Menu> was created without expected prop 'osuData'");
-    		}
-
-    		if (/*song*/ ctx[0] === undefined && !("song" in props)) {
-    			console_1$1.warn("<Menu> was created without expected prop 'song'");
-    		}
-
-    		if (/*config*/ ctx[1] === undefined && !("config" in props)) {
-    			console_1$1.warn("<Menu> was created without expected prop 'config'");
-    		}
     	}
 
     	get osuData() {
@@ -1633,15 +1720,23 @@ var app = (function () {
     	set config(value) {
     		throw new Error("<Menu>: Props cannot be set directly on the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
     	}
+
+    	get osuFolder() {
+    		throw new Error("<Menu>: Props cannot be read directly from the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+    	}
+
+    	set osuFolder(value) {
+    		throw new Error("<Menu>: Props cannot be set directly on the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+    	}
     }
 
-    /* src\Visualizer.svelte generated by Svelte v3.25.1 */
+    /* src/Visualizer.svelte generated by Svelte v3.52.0 */
 
-    const { console: console_1$2, window: window_1$1 } = globals;
-    const file$2 = "src\\Visualizer.svelte";
+    const { console: console_1, window: window_1 } = globals;
+    const file$1 = "src/Visualizer.svelte";
 
-    // (155:4) {#if songData && songData.beatmap && songData.beatmap.video && config.videoBackground}
-    function create_if_block$1(ctx) {
+    // (153:4) {#if songData && songData.beatmap && songData.beatmap.video && config.videoBackground}
+    function create_if_block(ctx) {
     	let video;
     	let source;
     	let source_src_value;
@@ -1650,70 +1745,70 @@ var app = (function () {
     		c: function create() {
     			video = element("video");
     			source = element("source");
-    			if (source.src !== (source_src_value = "file:///" + process.env.USERPROFILE.replace(/\\/g, "/") + "/AppData/Local/osu!/Songs/" + /*songData*/ ctx[0].folder + "/" + /*songData*/ ctx[0].beatmap.video)) attr_dev(source, "src", source_src_value);
-    			add_location(source, file$2, 162, 12, 6027);
+    			if (!src_url_equal(source.src, source_src_value = "file://" + /*osuFolder*/ ctx[2] + "/Songs/" + /*songData*/ ctx[0].folder + "/" + /*songData*/ ctx[0].beatmap.video)) attr_dev(source, "src", source_src_value);
+    			add_location(source, file$1, 160, 12, 5348);
 
-    			set_style(video, "width", /*isWidthSmaller*/ ctx[5]
+    			set_style(video, "width", /*isWidthSmaller*/ ctx[7]
     			? "auto"
-    			: `calc(100% + ${/*parallaxTreshold*/ ctx[4] * 1.5}px)`);
+    			: `calc(100% + ${/*parallaxTreshold*/ ctx[6] * 1.5}px)`);
 
-    			set_style(video, "height", !/*isWidthSmaller*/ ctx[5]
+    			set_style(video, "height", !/*isWidthSmaller*/ ctx[7]
     			? "auto"
-    			: `calc(100% + ${/*parallaxTreshold*/ ctx[4] * 1.5}px)`);
+    			: `calc(100% + ${/*parallaxTreshold*/ ctx[6] * 1.5}px)`);
 
-    			set_style(video, "top", /*mouse*/ ctx[3].y + "px");
-    			set_style(video, "left", /*mouse*/ ctx[3].x + "px");
+    			set_style(video, "top", /*mouse*/ ctx[5].y + "px");
+    			set_style(video, "left", /*mouse*/ ctx[5].x + "px");
     			attr_dev(video, "class", "svelte-18bmol8");
-    			add_location(video, file$2, 156, 8, 5710);
+    			add_location(video, file$1, 154, 8, 5037);
     		},
     		m: function mount(target, anchor) {
     			insert_dev(target, video, anchor);
     			append_dev(video, source);
-    			/*video_binding*/ ctx[11](video);
+    			/*video_binding*/ ctx[14](video);
     		},
     		p: function update(ctx, dirty) {
-    			if (dirty & /*songData*/ 1 && source.src !== (source_src_value = "file:///" + process.env.USERPROFILE.replace(/\\/g, "/") + "/AppData/Local/osu!/Songs/" + /*songData*/ ctx[0].folder + "/" + /*songData*/ ctx[0].beatmap.video)) {
+    			if (dirty & /*osuFolder, songData*/ 5 && !src_url_equal(source.src, source_src_value = "file://" + /*osuFolder*/ ctx[2] + "/Songs/" + /*songData*/ ctx[0].folder + "/" + /*songData*/ ctx[0].beatmap.video)) {
     				attr_dev(source, "src", source_src_value);
     			}
 
-    			if (dirty & /*isWidthSmaller, parallaxTreshold*/ 48) {
-    				set_style(video, "width", /*isWidthSmaller*/ ctx[5]
+    			if (dirty & /*isWidthSmaller, parallaxTreshold*/ 192) {
+    				set_style(video, "width", /*isWidthSmaller*/ ctx[7]
     				? "auto"
-    				: `calc(100% + ${/*parallaxTreshold*/ ctx[4] * 1.5}px)`);
+    				: `calc(100% + ${/*parallaxTreshold*/ ctx[6] * 1.5}px)`);
     			}
 
-    			if (dirty & /*isWidthSmaller, parallaxTreshold*/ 48) {
-    				set_style(video, "height", !/*isWidthSmaller*/ ctx[5]
+    			if (dirty & /*isWidthSmaller, parallaxTreshold*/ 192) {
+    				set_style(video, "height", !/*isWidthSmaller*/ ctx[7]
     				? "auto"
-    				: `calc(100% + ${/*parallaxTreshold*/ ctx[4] * 1.5}px)`);
+    				: `calc(100% + ${/*parallaxTreshold*/ ctx[6] * 1.5}px)`);
     			}
 
-    			if (dirty & /*mouse*/ 8) {
-    				set_style(video, "top", /*mouse*/ ctx[3].y + "px");
+    			if (dirty & /*mouse*/ 32) {
+    				set_style(video, "top", /*mouse*/ ctx[5].y + "px");
     			}
 
-    			if (dirty & /*mouse*/ 8) {
-    				set_style(video, "left", /*mouse*/ ctx[3].x + "px");
+    			if (dirty & /*mouse*/ 32) {
+    				set_style(video, "left", /*mouse*/ ctx[5].x + "px");
     			}
     		},
     		d: function destroy(detaching) {
     			if (detaching) detach_dev(video);
-    			/*video_binding*/ ctx[11](null);
+    			/*video_binding*/ ctx[14](null);
     		}
     	};
 
     	dispatch_dev("SvelteRegisterBlock", {
     		block,
-    		id: create_if_block$1.name,
+    		id: create_if_block.name,
     		type: "if",
-    		source: "(155:4) {#if songData && songData.beatmap && songData.beatmap.video && config.videoBackground}",
+    		source: "(153:4) {#if songData && songData.beatmap && songData.beatmap.video && config.videoBackground}",
     		ctx
     	});
 
     	return block;
     }
 
-    function create_fragment$2(ctx) {
+    function create_fragment$1(ctx) {
     	let div;
     	let t0;
     	let img0;
@@ -1723,7 +1818,7 @@ var app = (function () {
     	let img1_src_value;
     	let mounted;
     	let dispose;
-    	let if_block = /*songData*/ ctx[0] && /*songData*/ ctx[0].beatmap && /*songData*/ ctx[0].beatmap.video && /*config*/ ctx[1].videoBackground && create_if_block$1(ctx);
+    	let if_block = /*songData*/ ctx[0] && /*songData*/ ctx[0].beatmap && /*songData*/ ctx[0].beatmap.video && /*config*/ ctx[1].videoBackground && create_if_block(ctx);
 
     	const block = {
     		c: function create() {
@@ -1733,27 +1828,27 @@ var app = (function () {
     			img0 = element("img");
     			t1 = space();
     			img1 = element("img");
-    			if (img0.src !== (img0_src_value = "images/logo.svg")) attr_dev(img0, "src", img0_src_value);
+    			if (!src_url_equal(img0.src, img0_src_value = "images/logo.svg")) attr_dev(img0, "src", img0_src_value);
     			attr_dev(img0, "alt", "logo");
     			attr_dev(img0, "class", "logo svelte-18bmol8");
-    			set_style(img0, "animation-duration", /*animDuration*/ ctx[6] + "ms");
+    			set_style(img0, "animation-duration", /*animDuration*/ ctx[8] + "ms");
     			toggle_class(img0, "repeat", /*songData*/ ctx[0].playing);
-    			add_location(img0, file$2, 165, 4, 6198);
-    			if (img1.src !== (img1_src_value = "images/logo.svg")) attr_dev(img1, "src", img1_src_value);
+    			add_location(img0, file$1, 163, 4, 5462);
+    			if (!src_url_equal(img1.src, img1_src_value = "images/logo.svg")) attr_dev(img1, "src", img1_src_value);
     			attr_dev(img1, "alt", "");
     			attr_dev(img1, "class", "shadow svelte-18bmol8");
-    			set_style(img1, "animation-duration", /*animDuration*/ ctx[6] * 2 + "ms");
+    			set_style(img1, "animation-duration", /*animDuration*/ ctx[8] * 2 + "ms");
     			toggle_class(img1, "repeat", /*songData*/ ctx[0].playing);
-    			add_location(img1, file$2, 166, 4, 6333);
+    			add_location(img1, file$1, 164, 4, 5596);
     			attr_dev(div, "class", "main svelte-18bmol8");
-    			set_style(div, "background-image", "url('" + /*wallpaper*/ ctx[2] + "')");
+    			set_style(div, "background-image", "url('" + /*wallpaper*/ ctx[3] + "')");
 
-    			set_style(div, "background-size", !/*isWidthSmaller*/ ctx[5]
-    			? `calc(100% + ${/*parallaxTreshold*/ ctx[4] * 1.5}px) auto`
-    			: `auto calc(100% + ${/*parallaxTreshold*/ ctx[4] * 1.5}px)`);
+    			set_style(div, "background-size", !/*isWidthSmaller*/ ctx[7]
+    			? `calc(100% + ${/*parallaxTreshold*/ ctx[6] * 1.5}px) auto`
+    			: `auto calc(100% + ${/*parallaxTreshold*/ ctx[6] * 1.5}px)`);
 
-    			set_style(div, "background-position", /*mouse*/ ctx[3].x + "px " + /*mouse*/ ctx[3].y + "px");
-    			add_location(div, file$2, 146, 0, 5261);
+    			set_style(div, "background-position", /*mouse*/ ctx[5].x + "px " + /*mouse*/ ctx[5].y + "px");
+    			add_location(div, file$1, 144, 0, 4598);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
@@ -1768,8 +1863,8 @@ var app = (function () {
 
     			if (!mounted) {
     				dispose = [
-    					listen_dev(window_1$1, "mousemove", /*updateMouse*/ ctx[8], false, false, false),
-    					listen_dev(window_1$1, "resize", /*resize*/ ctx[9], false, false, false)
+    					listen_dev(window_1, "mousemove", /*updateMouse*/ ctx[9], false, false, false),
+    					listen_dev(window_1, "resize", /*resize*/ ctx[10], false, false, false)
     				];
 
     				mounted = true;
@@ -1780,7 +1875,7 @@ var app = (function () {
     				if (if_block) {
     					if_block.p(ctx, dirty);
     				} else {
-    					if_block = create_if_block$1(ctx);
+    					if_block = create_if_block(ctx);
     					if_block.c();
     					if_block.m(div, t0);
     				}
@@ -1789,34 +1884,34 @@ var app = (function () {
     				if_block = null;
     			}
 
-    			if (dirty & /*animDuration*/ 64) {
-    				set_style(img0, "animation-duration", /*animDuration*/ ctx[6] + "ms");
+    			if (dirty & /*animDuration*/ 256) {
+    				set_style(img0, "animation-duration", /*animDuration*/ ctx[8] + "ms");
     			}
 
     			if (dirty & /*songData*/ 1) {
     				toggle_class(img0, "repeat", /*songData*/ ctx[0].playing);
     			}
 
-    			if (dirty & /*animDuration*/ 64) {
-    				set_style(img1, "animation-duration", /*animDuration*/ ctx[6] * 2 + "ms");
+    			if (dirty & /*animDuration*/ 256) {
+    				set_style(img1, "animation-duration", /*animDuration*/ ctx[8] * 2 + "ms");
     			}
 
     			if (dirty & /*songData*/ 1) {
     				toggle_class(img1, "repeat", /*songData*/ ctx[0].playing);
     			}
 
-    			if (dirty & /*wallpaper*/ 4) {
-    				set_style(div, "background-image", "url('" + /*wallpaper*/ ctx[2] + "')");
+    			if (dirty & /*wallpaper*/ 8) {
+    				set_style(div, "background-image", "url('" + /*wallpaper*/ ctx[3] + "')");
     			}
 
-    			if (dirty & /*isWidthSmaller, parallaxTreshold*/ 48) {
-    				set_style(div, "background-size", !/*isWidthSmaller*/ ctx[5]
-    				? `calc(100% + ${/*parallaxTreshold*/ ctx[4] * 1.5}px) auto`
-    				: `auto calc(100% + ${/*parallaxTreshold*/ ctx[4] * 1.5}px)`);
+    			if (dirty & /*isWidthSmaller, parallaxTreshold*/ 192) {
+    				set_style(div, "background-size", !/*isWidthSmaller*/ ctx[7]
+    				? `calc(100% + ${/*parallaxTreshold*/ ctx[6] * 1.5}px) auto`
+    				: `auto calc(100% + ${/*parallaxTreshold*/ ctx[6] * 1.5}px)`);
     			}
 
-    			if (dirty & /*mouse*/ 8) {
-    				set_style(div, "background-position", /*mouse*/ ctx[3].x + "px " + /*mouse*/ ctx[3].y + "px");
+    			if (dirty & /*mouse*/ 32) {
+    				set_style(div, "background-position", /*mouse*/ ctx[5].x + "px " + /*mouse*/ ctx[5].y + "px");
     			}
     		},
     		i: noop,
@@ -1831,7 +1926,7 @@ var app = (function () {
 
     	dispatch_dev("SvelteRegisterBlock", {
     		block,
-    		id: create_fragment$2.name,
+    		id: create_fragment$1.name,
     		type: "component",
     		source: "",
     		ctx
@@ -1840,26 +1935,27 @@ var app = (function () {
     	return block;
     }
 
-    function instance$2($$self, $$props, $$invalidate) {
+    function instance$1($$self, $$props, $$invalidate) {
     	let { $$slots: slots = {}, $$scope } = $$props;
-    	validate_slots("Visualizer", slots, []);
+    	validate_slots('Visualizer', slots, []);
     	const fs = require("fs");
     	const OsuDBParser = require("osu-db-parser");
     	const osuParser = require("./lib/osu-parser.js");
-    	var { osuData } = $$props;
-    	var { songData } = $$props;
-    	var { config } = $$props;
+    	let { osuData } = $$props;
+    	let { songData } = $$props;
+    	let { config } = $$props;
+    	let { osuFolder } = $$props;
     	var wallpapers = [];
 
     	try {
-    		wallpapers = fs.readdirSync(process.env.USERPROFILE + "/AppData/Local/osu!/Data/bg");
+    		wallpapers = fs.readdirSync(`${osuFolder}/Data/bg`);
     	} catch(e) {
     		console.error("Osu backgrounds weren't found. You must have osu installed and started at least once.", e);
     		alert("Osu backgrounds not found!");
     	}
 
     	try {
-    		osuData = new OsuDBParser(Buffer.from(fs.readFileSync(process.env.USERPROFILE + "/AppData/Local/osu!/osu!.db"))).getOsuDBData();
+    		osuData = new OsuDBParser(Buffer.from(fs.readFileSync(`${osuFolder}/osu!.db`))).getOsuDBData();
     		console.log(osuData);
 
     		osuData.songs = osuData.beatmaps.map(v => ({
@@ -1882,18 +1978,16 @@ var app = (function () {
 
     	function shuffleWallpapers() {
     		switch (config.backgrounds) {
-    			case 0:
-    				$$invalidate(2, wallpaper = `${process.env.USERPROFILE.replace(/\\/g, "/")}/AppData/Local/osu!/Data/bg/${wallpapers[Math.floor(Math.random() * wallpapers.length)]}`);
-    				break;
     			case 1:
     				if (songData.beatmap) {
-    					$$invalidate(2, wallpaper = `${process.env.USERPROFILE.replace(/\\/g, "/")}/AppData/Local/osu!/Songs/${songData.folder}/${songData.beatmap.bgFilename}`);
+    					$$invalidate(3, wallpaper = `${osuFolder}/Songs/${songData.folder}/${songData.beatmap.bgFilename}`);
     				} else {
-    					$$invalidate(2, wallpaper = `${process.env.USERPROFILE.replace(/\\/g, "/")}/AppData/Local/osu!/Data/bg/${wallpapers[Math.floor(Math.random() * wallpapers.length)]}`);
+    					$$invalidate(3, wallpaper = `${osuFolder}/Data/bg/${wallpapers[Math.floor(Math.random() * wallpapers.length)]}`);
     				}
     				break;
+    			case 0:
     			default:
-    				$$invalidate(2, wallpaper = `${process.env.USERPROFILE.replace(/\\/g, "/")}/AppData/Local/osu!/Data/bg/${wallpapers[Math.floor(Math.random() * wallpapers.length)]}`);
+    				$$invalidate(3, wallpaper = `${osuFolder}/Data/bg/${wallpapers[Math.floor(Math.random() * wallpapers.length)]}`);
     		}
     	}
 
@@ -1902,11 +1996,11 @@ var app = (function () {
     	var lastBackgroundOption = null;
 
     	function fetchBeatmap() {
-    		let file = fs.readFileSync(process.env.USERPROFILE + "/AppData/Local/osu!/Songs/" + songData.folder + "/" + songData.dataFile);
+    		let file = fs.readFileSync(`${osuFolder}/Songs/${songData.folder}/${songData.dataFile}`);
     		$$invalidate(0, songData.beatmap = osuParser.parseContent(file), songData);
 
     		if (config.backgrounds === 1) {
-    			$$invalidate(2, wallpaper = `${process.env.USERPROFILE.replace(/\\/g, "/")}/AppData/Local/osu!/Songs/${songData.folder}/${songData.beatmap.bgFilename}`);
+    			$$invalidate(3, wallpaper = `${osuFolder}/Songs/${songData.folder}/${songData.beatmap.bgFilename}`);
     		}
     	}
 
@@ -1916,7 +2010,7 @@ var app = (function () {
     	function updateMouse(e) {
     		if (!config.parallax.enabled) return;
 
-    		$$invalidate(3, mouse = {
+    		$$invalidate(5, mouse = {
     			x: -(e.clientX / window.innerWidth) * parallaxTreshold - parallaxTreshold / 2,
     			y: -(e.clientY / window.innerHeight) * parallaxTreshold - parallaxTreshold / 2
     		});
@@ -1925,7 +2019,7 @@ var app = (function () {
     	var isWidthSmaller = false;
 
     	function resize() {
-    		$$invalidate(5, isWidthSmaller = window.innerWidth * 9 < window.innerHeight * 16);
+    		$$invalidate(7, isWidthSmaller = window.innerWidth * 9 < window.innerHeight * 16);
     	}
 
     	resize();
@@ -1945,45 +2039,65 @@ var app = (function () {
     			}
 
     			if (!tp) {
-    				$$invalidate(6, animDuration = 0);
+    				$$invalidate(8, animDuration = 0);
     				kiaiTime = false;
     				return;
     			}
 
-    			if (tp.beatLength / 2 !== animDuration) $$invalidate(6, animDuration = tp.beatLength / 2);
+    			if (tp.beatLength / 2 !== animDuration) $$invalidate(8, animDuration = tp.beatLength / 2);
     			kiaiTime = tp.kiaiTimeActive;
     		},
     		50
     	);
 
     	var backgroundVideo;
-    	const writable_props = ["osuData", "songData", "config"];
+
+    	$$self.$$.on_mount.push(function () {
+    		if (osuData === undefined && !('osuData' in $$props || $$self.$$.bound[$$self.$$.props['osuData']])) {
+    			console_1.warn("<Visualizer> was created without expected prop 'osuData'");
+    		}
+
+    		if (songData === undefined && !('songData' in $$props || $$self.$$.bound[$$self.$$.props['songData']])) {
+    			console_1.warn("<Visualizer> was created without expected prop 'songData'");
+    		}
+
+    		if (config === undefined && !('config' in $$props || $$self.$$.bound[$$self.$$.props['config']])) {
+    			console_1.warn("<Visualizer> was created without expected prop 'config'");
+    		}
+
+    		if (osuFolder === undefined && !('osuFolder' in $$props || $$self.$$.bound[$$self.$$.props['osuFolder']])) {
+    			console_1.warn("<Visualizer> was created without expected prop 'osuFolder'");
+    		}
+    	});
+
+    	const writable_props = ['osuData', 'songData', 'config', 'osuFolder'];
 
     	Object.keys($$props).forEach(key => {
-    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== "$$") console_1$2.warn(`<Visualizer> was created with unknown prop '${key}'`);
+    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console_1.warn(`<Visualizer> was created with unknown prop '${key}'`);
     	});
 
     	function video_binding($$value) {
-    		binding_callbacks[$$value ? "unshift" : "push"](() => {
+    		binding_callbacks[$$value ? 'unshift' : 'push'](() => {
     			backgroundVideo = $$value;
-    			$$invalidate(7, backgroundVideo);
+    			$$invalidate(4, backgroundVideo);
     		});
     	}
 
     	$$self.$$set = $$props => {
-    		if ("osuData" in $$props) $$invalidate(10, osuData = $$props.osuData);
-    		if ("songData" in $$props) $$invalidate(0, songData = $$props.songData);
-    		if ("config" in $$props) $$invalidate(1, config = $$props.config);
+    		if ('osuData' in $$props) $$invalidate(11, osuData = $$props.osuData);
+    		if ('songData' in $$props) $$invalidate(0, songData = $$props.songData);
+    		if ('config' in $$props) $$invalidate(1, config = $$props.config);
+    		if ('osuFolder' in $$props) $$invalidate(2, osuFolder = $$props.osuFolder);
     	};
 
     	$$self.$capture_state = () => ({
-    		onMount,
     		fs,
     		OsuDBParser,
     		osuParser,
     		osuData,
     		songData,
     		config,
+    		osuFolder,
     		wallpapers,
     		wallpaper,
     		shuffleWallpapers,
@@ -2001,19 +2115,20 @@ var app = (function () {
     	});
 
     	$$self.$inject_state = $$props => {
-    		if ("osuData" in $$props) $$invalidate(10, osuData = $$props.osuData);
-    		if ("songData" in $$props) $$invalidate(0, songData = $$props.songData);
-    		if ("config" in $$props) $$invalidate(1, config = $$props.config);
-    		if ("wallpapers" in $$props) wallpapers = $$props.wallpapers;
-    		if ("wallpaper" in $$props) $$invalidate(2, wallpaper = $$props.wallpaper);
-    		if ("lastSong" in $$props) $$invalidate(13, lastSong = $$props.lastSong);
-    		if ("lastBackgroundOption" in $$props) $$invalidate(14, lastBackgroundOption = $$props.lastBackgroundOption);
-    		if ("mouse" in $$props) $$invalidate(3, mouse = $$props.mouse);
-    		if ("parallaxTreshold" in $$props) $$invalidate(4, parallaxTreshold = $$props.parallaxTreshold);
-    		if ("isWidthSmaller" in $$props) $$invalidate(5, isWidthSmaller = $$props.isWidthSmaller);
-    		if ("animDuration" in $$props) $$invalidate(6, animDuration = $$props.animDuration);
-    		if ("kiaiTime" in $$props) kiaiTime = $$props.kiaiTime;
-    		if ("backgroundVideo" in $$props) $$invalidate(7, backgroundVideo = $$props.backgroundVideo);
+    		if ('osuData' in $$props) $$invalidate(11, osuData = $$props.osuData);
+    		if ('songData' in $$props) $$invalidate(0, songData = $$props.songData);
+    		if ('config' in $$props) $$invalidate(1, config = $$props.config);
+    		if ('osuFolder' in $$props) $$invalidate(2, osuFolder = $$props.osuFolder);
+    		if ('wallpapers' in $$props) wallpapers = $$props.wallpapers;
+    		if ('wallpaper' in $$props) $$invalidate(3, wallpaper = $$props.wallpaper);
+    		if ('lastSong' in $$props) $$invalidate(12, lastSong = $$props.lastSong);
+    		if ('lastBackgroundOption' in $$props) $$invalidate(13, lastBackgroundOption = $$props.lastBackgroundOption);
+    		if ('mouse' in $$props) $$invalidate(5, mouse = $$props.mouse);
+    		if ('parallaxTreshold' in $$props) $$invalidate(6, parallaxTreshold = $$props.parallaxTreshold);
+    		if ('isWidthSmaller' in $$props) $$invalidate(7, isWidthSmaller = $$props.isWidthSmaller);
+    		if ('animDuration' in $$props) $$invalidate(8, animDuration = $$props.animDuration);
+    		if ('kiaiTime' in $$props) kiaiTime = $$props.kiaiTime;
+    		if ('backgroundVideo' in $$props) $$invalidate(4, backgroundVideo = $$props.backgroundVideo);
     	};
 
     	if ($$props && "$$inject" in $$props) {
@@ -2021,8 +2136,8 @@ var app = (function () {
     	}
 
     	$$self.$$.update = () => {
-    		if ($$self.$$.dirty & /*backgroundVideo, songData*/ 129) {
-    			 {
+    		if ($$self.$$.dirty & /*backgroundVideo, songData*/ 17) {
+    			{
     				if (backgroundVideo) {
     					$$invalidate(0, songData.video = backgroundVideo, songData);
 
@@ -2033,55 +2148,58 @@ var app = (function () {
     			}
     		}
 
-    		if ($$self.$$.dirty & /*songData, lastSong, config, lastBackgroundOption*/ 24579) {
-    			 {
+    		if ($$self.$$.dirty & /*songData, lastSong, config, lastBackgroundOption*/ 12291) {
+    			{
     				if (songData !== lastSong) {
-    					$$invalidate(13, lastSong = songData);
+    					$$invalidate(12, lastSong = songData);
     					shuffleWallpapers();
     				}
 
     				if (config.backgrounds !== lastBackgroundOption) {
-    					$$invalidate(14, lastBackgroundOption = config.backgrounds);
+    					$$invalidate(13, lastBackgroundOption = config.backgrounds);
     					shuffleWallpapers();
     				}
     			}
     		}
 
     		if ($$self.$$.dirty & /*songData*/ 1) {
-    			 if (songData && songData.dataFile && !songData.beatmap) fetchBeatmap();
+    			if (songData && songData.dataFile && !songData.beatmap) fetchBeatmap();
     		}
 
     		if ($$self.$$.dirty & /*config*/ 2) {
-    			 $$invalidate(4, parallaxTreshold = config.parallax.treshold);
+    			$$invalidate(6, parallaxTreshold = config.parallax.treshold);
     		}
 
     		if ($$self.$$.dirty & /*songData, config*/ 3) {
-    			 {
+    			{
     				if (!songData || !songData.beatmap || !songData.beatmap.video || !config.videoBackground) window.backgroundVideo = null;
     			}
     		}
 
-    		if ($$self.$$.dirty & /*wallpaper*/ 4) {
-    			 console.log("Wallpaper", wallpaper);
+    		if ($$self.$$.dirty & /*wallpaper*/ 8) {
+    			console.log("Wallpaper", wallpaper);
     		}
 
     		if ($$self.$$.dirty & /*songData*/ 1) {
-    			 console.log("Beatmap", songData.beatmap);
+    			console.log("Beatmap", songData.beatmap);
     		}
     	};
 
     	return [
     		songData,
     		config,
+    		osuFolder,
     		wallpaper,
+    		backgroundVideo,
     		mouse,
     		parallaxTreshold,
     		isWidthSmaller,
     		animDuration,
-    		backgroundVideo,
     		updateMouse,
     		resize,
     		osuData,
+    		lastSong,
+    		lastBackgroundOption,
     		video_binding
     	];
     }
@@ -2089,29 +2207,20 @@ var app = (function () {
     class Visualizer extends SvelteComponentDev {
     	constructor(options) {
     		super(options);
-    		init(this, options, instance$2, create_fragment$2, safe_not_equal, { osuData: 10, songData: 0, config: 1 });
+
+    		init(this, options, instance$1, create_fragment$1, safe_not_equal, {
+    			osuData: 11,
+    			songData: 0,
+    			config: 1,
+    			osuFolder: 2
+    		});
 
     		dispatch_dev("SvelteRegisterComponent", {
     			component: this,
     			tagName: "Visualizer",
     			options,
-    			id: create_fragment$2.name
+    			id: create_fragment$1.name
     		});
-
-    		const { ctx } = this.$$;
-    		const props = options.props || {};
-
-    		if (/*osuData*/ ctx[10] === undefined && !("osuData" in props)) {
-    			console_1$2.warn("<Visualizer> was created without expected prop 'osuData'");
-    		}
-
-    		if (/*songData*/ ctx[0] === undefined && !("songData" in props)) {
-    			console_1$2.warn("<Visualizer> was created without expected prop 'songData'");
-    		}
-
-    		if (/*config*/ ctx[1] === undefined && !("config" in props)) {
-    			console_1$2.warn("<Visualizer> was created without expected prop 'config'");
-    		}
     	}
 
     	get osuData() {
@@ -2137,12 +2246,20 @@ var app = (function () {
     	set config(value) {
     		throw new Error("<Visualizer>: Props cannot be set directly on the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
     	}
+
+    	get osuFolder() {
+    		throw new Error("<Visualizer>: Props cannot be read directly from the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+    	}
+
+    	set osuFolder(value) {
+    		throw new Error("<Visualizer>: Props cannot be set directly on the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+    	}
     }
 
-    /* src\App.svelte generated by Svelte v3.25.1 */
-    const file$3 = "src\\App.svelte";
+    /* src/App.svelte generated by Svelte v3.52.0 */
+    const file = "src/App.svelte";
 
-    function create_fragment$3(ctx) {
+    function create_fragment(ctx) {
     	let main;
     	let div0;
     	let visualizer;
@@ -2157,17 +2274,20 @@ var app = (function () {
     	let current;
 
     	function visualizer_songData_binding(value) {
-    		/*visualizer_songData_binding*/ ctx[3].call(null, value);
+    		/*visualizer_songData_binding*/ ctx[4](value);
     	}
 
     	function visualizer_osuData_binding(value) {
-    		/*visualizer_osuData_binding*/ ctx[4].call(null, value);
+    		/*visualizer_osuData_binding*/ ctx[5](value);
     	}
 
-    	let visualizer_props = { config: /*config*/ ctx[1] };
+    	let visualizer_props = {
+    		config: /*config*/ ctx[0],
+    		osuFolder: /*osuFolder*/ ctx[3]
+    	};
 
-    	if (/*songData*/ ctx[0] !== void 0) {
-    		visualizer_props.songData = /*songData*/ ctx[0];
+    	if (/*songData*/ ctx[1] !== void 0) {
+    		visualizer_props.songData = /*songData*/ ctx[1];
     	}
 
     	if (/*osuData*/ ctx[2] !== void 0) {
@@ -2175,39 +2295,39 @@ var app = (function () {
     	}
 
     	visualizer = new Visualizer({ props: visualizer_props, $$inline: true });
-    	binding_callbacks.push(() => bind(visualizer, "songData", visualizer_songData_binding));
-    	binding_callbacks.push(() => bind(visualizer, "osuData", visualizer_osuData_binding));
+    	binding_callbacks.push(() => bind(visualizer, 'songData', visualizer_songData_binding));
+    	binding_callbacks.push(() => bind(visualizer, 'osuData', visualizer_osuData_binding));
 
     	function menu_song_binding(value) {
-    		/*menu_song_binding*/ ctx[5].call(null, value);
+    		/*menu_song_binding*/ ctx[6](value);
     	}
 
     	function menu_osuData_binding(value) {
-    		/*menu_osuData_binding*/ ctx[6].call(null, value);
+    		/*menu_osuData_binding*/ ctx[7](value);
     	}
 
     	function menu_config_binding(value) {
-    		/*menu_config_binding*/ ctx[7].call(null, value);
+    		/*menu_config_binding*/ ctx[8](value);
     	}
 
-    	let menu_props = {};
+    	let menu_props = { osuFolder: /*osuFolder*/ ctx[3] };
 
-    	if (/*songData*/ ctx[0] !== void 0) {
-    		menu_props.song = /*songData*/ ctx[0];
+    	if (/*songData*/ ctx[1] !== void 0) {
+    		menu_props.song = /*songData*/ ctx[1];
     	}
 
     	if (/*osuData*/ ctx[2] !== void 0) {
     		menu_props.osuData = /*osuData*/ ctx[2];
     	}
 
-    	if (/*config*/ ctx[1] !== void 0) {
-    		menu_props.config = /*config*/ ctx[1];
+    	if (/*config*/ ctx[0] !== void 0) {
+    		menu_props.config = /*config*/ ctx[0];
     	}
 
     	menu = new Menu({ props: menu_props, $$inline: true });
-    	binding_callbacks.push(() => bind(menu, "song", menu_song_binding));
-    	binding_callbacks.push(() => bind(menu, "osuData", menu_osuData_binding));
-    	binding_callbacks.push(() => bind(menu, "config", menu_config_binding));
+    	binding_callbacks.push(() => bind(menu, 'song', menu_song_binding));
+    	binding_callbacks.push(() => bind(menu, 'osuData', menu_osuData_binding));
+    	binding_callbacks.push(() => bind(menu, 'config', menu_config_binding));
 
     	const block = {
     		c: function create() {
@@ -2218,11 +2338,11 @@ var app = (function () {
     			div1 = element("div");
     			create_component(menu.$$.fragment);
     			attr_dev(div0, "class", "background svelte-5atqf");
-    			add_location(div0, file$3, 51, 4, 1440);
+    			add_location(div0, file, 52, 4, 1486);
     			attr_dev(div1, "class", "menu svelte-5atqf");
-    			add_location(div1, file$3, 54, 4, 1542);
+    			add_location(div1, file, 55, 4, 1597);
     			attr_dev(main, "class", "svelte-5atqf");
-    			add_location(main, file$3, 50, 0, 1428);
+    			add_location(main, file, 51, 0, 1475);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
@@ -2238,11 +2358,11 @@ var app = (function () {
     		},
     		p: function update(ctx, [dirty]) {
     			const visualizer_changes = {};
-    			if (dirty & /*config*/ 2) visualizer_changes.config = /*config*/ ctx[1];
+    			if (dirty & /*config*/ 1) visualizer_changes.config = /*config*/ ctx[0];
 
-    			if (!updating_songData && dirty & /*songData*/ 1) {
+    			if (!updating_songData && dirty & /*songData*/ 2) {
     				updating_songData = true;
-    				visualizer_changes.songData = /*songData*/ ctx[0];
+    				visualizer_changes.songData = /*songData*/ ctx[1];
     				add_flush_callback(() => updating_songData = false);
     			}
 
@@ -2255,9 +2375,9 @@ var app = (function () {
     			visualizer.$set(visualizer_changes);
     			const menu_changes = {};
 
-    			if (!updating_song && dirty & /*songData*/ 1) {
+    			if (!updating_song && dirty & /*songData*/ 2) {
     				updating_song = true;
-    				menu_changes.song = /*songData*/ ctx[0];
+    				menu_changes.song = /*songData*/ ctx[1];
     				add_flush_callback(() => updating_song = false);
     			}
 
@@ -2267,9 +2387,9 @@ var app = (function () {
     				add_flush_callback(() => updating_osuData_1 = false);
     			}
 
-    			if (!updating_config && dirty & /*config*/ 2) {
+    			if (!updating_config && dirty & /*config*/ 1) {
     				updating_config = true;
-    				menu_changes.config = /*config*/ ctx[1];
+    				menu_changes.config = /*config*/ ctx[0];
     				add_flush_callback(() => updating_config = false);
     			}
 
@@ -2295,7 +2415,7 @@ var app = (function () {
 
     	dispatch_dev("SvelteRegisterBlock", {
     		block,
-    		id: create_fragment$3.name,
+    		id: create_fragment.name,
     		type: "component",
     		source: "",
     		ctx
@@ -2304,14 +2424,15 @@ var app = (function () {
     	return block;
     }
 
-    function instance$3($$self, $$props, $$invalidate) {
+    function instance($$self, $$props, $$invalidate) {
     	let { $$slots: slots = {}, $$scope } = $$props;
-    	validate_slots("App", slots, []);
-    	const Store = require("electron-store");
+    	validate_slots('App', slots, []);
+    	const Store = require('electron-store');
     	const store = new Store();
     	var songData = {};
     	var config = store.get("config");
     	var osuData = {};
+    	const osuFolder = process.env.OSU_FOLDER || process.env.USERPROFILE + "/AppData/Local/osu!";
 
     	(() => {
     		const configTemplate = {
@@ -2341,18 +2462,18 @@ var app = (function () {
     			return out;
     		}
 
-    		$$invalidate(1, config = checkSettings(config, configTemplate));
+    		$$invalidate(0, config = checkSettings(config, configTemplate));
     	})();
 
     	const writable_props = [];
 
     	Object.keys($$props).forEach(key => {
-    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== "$$") console.warn(`<App> was created with unknown prop '${key}'`);
+    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console.warn(`<App> was created with unknown prop '${key}'`);
     	});
 
     	function visualizer_songData_binding(value) {
     		songData = value;
-    		$$invalidate(0, songData);
+    		$$invalidate(1, songData);
     	}
 
     	function visualizer_osuData_binding(value) {
@@ -2362,7 +2483,7 @@ var app = (function () {
 
     	function menu_song_binding(value) {
     		songData = value;
-    		$$invalidate(0, songData);
+    		$$invalidate(1, songData);
     	}
 
     	function menu_osuData_binding(value) {
@@ -2372,7 +2493,7 @@ var app = (function () {
 
     	function menu_config_binding(value) {
     		config = value;
-    		$$invalidate(1, config);
+    		$$invalidate(0, config);
     	}
 
     	$$self.$capture_state = () => ({
@@ -2382,13 +2503,14 @@ var app = (function () {
     		store,
     		songData,
     		config,
-    		osuData
+    		osuData,
+    		osuFolder
     	});
 
     	$$self.$inject_state = $$props => {
-    		if ("songData" in $$props) $$invalidate(0, songData = $$props.songData);
-    		if ("config" in $$props) $$invalidate(1, config = $$props.config);
-    		if ("osuData" in $$props) $$invalidate(2, osuData = $$props.osuData);
+    		if ('songData' in $$props) $$invalidate(1, songData = $$props.songData);
+    		if ('config' in $$props) $$invalidate(0, config = $$props.config);
+    		if ('osuData' in $$props) $$invalidate(2, osuData = $$props.osuData);
     	};
 
     	if ($$props && "$$inject" in $$props) {
@@ -2396,15 +2518,16 @@ var app = (function () {
     	}
 
     	$$self.$$.update = () => {
-    		if ($$self.$$.dirty & /*config*/ 2) {
-    			 store.set("config", config);
+    		if ($$self.$$.dirty & /*config*/ 1) {
+    			store.set("config", config);
     		}
     	};
 
     	return [
-    		songData,
     		config,
+    		songData,
     		osuData,
+    		osuFolder,
     		visualizer_songData_binding,
     		visualizer_osuData_binding,
     		menu_song_binding,
@@ -2416,13 +2539,13 @@ var app = (function () {
     class App extends SvelteComponentDev {
     	constructor(options) {
     		super(options);
-    		init(this, options, instance$3, create_fragment$3, safe_not_equal, {});
+    		init(this, options, instance, create_fragment, safe_not_equal, {});
 
     		dispatch_dev("SvelteRegisterComponent", {
     			component: this,
     			tagName: "App",
     			options,
-    			id: create_fragment$3.name
+    			id: create_fragment.name
     		});
     	}
     }
@@ -2433,5 +2556,5 @@ var app = (function () {
 
     return app;
 
-}());
+})();
 //# sourceMappingURL=bundle.js.map

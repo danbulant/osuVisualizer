@@ -1,11 +1,10 @@
 <script>
     import Options from "./components/options.svelte";
-    const fs = require("fs");
-    const osuParser = require("./lib/osu-parser.js");
 
     export var osuData;
     export var song;
     export var config;
+    export var osuFolder;
 
     var last = Date.now();
     var lastVolumeUpdate = Date.now() - 5000;
@@ -53,7 +52,7 @@
                 // var audioCtx = new (window.AudioContext || window.webkitAudioContext)();
                 // song.context = audioCtx;
                 // song.analyser = audioCtx.createAnalyser();
-                song.audio = new Audio(process.env.USERPROFILE + "/AppData/Local/osu!/Songs/" + song.folder + "/" + song.audioFile);
+                song.audio = new Audio(`${osuFolder}/Songs/${song.folder}/${song.audioFile}`);
                 // song.source = audioCtx.createMediaElementSource(song.audio);
                 // song.source.connect(song.analyser);
                 // song.analyser.connect(audioCtx.destination);
@@ -76,7 +75,7 @@
                         artist: song.artist,
                         album: "Osu! visualizer",
                         artwork: [
-                            // { src: process.env.USERPROFILE + "/AppData/Local/osu!/Data/bt/" + song.id + ".jpg", type: 'image/jpeg' },
+                            { src: `${osuFolder}/Data/bt/${song.id}.jpg`, type: 'image/jpeg' },
                         ]
                     });
 
@@ -184,7 +183,7 @@
             </div>
         </div>
     {/if}
-    <Options bind:config={config} bind:visible={settingsOpen} />
+    <Options bind:config={config} bind:visible={settingsOpen} {osuFolder} />
 </div>
 
 <style>

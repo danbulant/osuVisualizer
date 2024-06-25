@@ -1,22 +1,22 @@
 <script>
-    import { onMount } from 'svelte';
     const fs = require("fs");
     const OsuDBParser = require("osu-db-parser");
     const osuParser = require("./lib/osu-parser.js");
     export var osuData;
     export var songData;
     export var config;
+    export var osuFolder;
 
     var wallpapers = [];
     try {
-        wallpapers = fs.readdirSync(process.env.USERPROFILE + "/AppData/Local/osu!/Data/bg");
+        wallpapers = fs.readdirSync(`${osuFolder}/Data/bg`);
     } catch(e) {
         console.error("Osu backgrounds weren't found. You must have osu installed and started at least once.", e);
         alert("Osu backgrounds not found!");
     }
 
     try {
-        osuData = (new OsuDBParser(Buffer.from(fs.readFileSync(process.env.USERPROFILE + "/AppData/Local/osu!/osu!.db")))).getOsuDBData();
+        osuData = (new OsuDBParser(Buffer.from(fs.readFileSync(`${osuFolder}/osu!.db`)))).getOsuDBData();
         console.log(osuData);
         osuData.songs = osuData.beatmaps.map(v => ({
             artist: v.artist_name,
@@ -37,18 +37,16 @@
     var wallpaper;
     function shuffleWallpapers() {
         switch(config.backgrounds) {
-            case 0:
-                wallpaper = `${process.env.USERPROFILE.replace(/\\/g, "/")}/AppData/Local/osu!/Data/bg/${wallpapers[Math.floor(Math.random() * wallpapers.length)]}`;
-                break;
             case 1:
                 if(songData.beatmap) {
-                    wallpaper = `${process.env.USERPROFILE.replace(/\\/g, "/")}/AppData/Local/osu!/Songs/${songData.folder}/${songData.beatmap.bgFilename}`;
+                    wallpaper = `${osuFolder}/Songs/${songData.folder}/${songData.beatmap.bgFilename}`;
                 } else {
-                    wallpaper = `${process.env.USERPROFILE.replace(/\\/g, "/")}/AppData/Local/osu!/Data/bg/${wallpapers[Math.floor(Math.random() * wallpapers.length)]}`;
+                    wallpaper = `${osuFolder}/Data/bg/${wallpapers[Math.floor(Math.random() * wallpapers.length)]}`;
                 }
                 break;
+            case 0:
             default:
-                wallpaper = `${process.env.USERPROFILE.replace(/\\/g, "/")}/AppData/Local/osu!/Data/bg/${wallpapers[Math.floor(Math.random() * wallpapers.length)]}`;
+                wallpaper = `${osuFolder}/Data/bg/${wallpapers[Math.floor(Math.random() * wallpapers.length)]}`;
         }
     }
     shuffleWallpapers();
@@ -67,11 +65,11 @@
         }
     }
     function fetchBeatmap() {
-        let file = fs.readFileSync(process.env.USERPROFILE + "/AppData/Local/osu!/Songs/" + songData.folder + "/" + songData.dataFile);
+        let file = fs.readFileSync(`${osuFolder}/Songs/${songData.folder}/${songData.dataFile}`);
         songData.beatmap = osuParser.parseContent(file);
 
         if(config.backgrounds === 1) {
-            wallpaper = `${process.env.USERPROFILE.replace(/\\/g, "/")}/AppData/Local/osu!/Songs/${songData.folder}/${songData.beatmap.bgFilename}`;
+            wallpaper = `${osuFolder}/Songs/${songData.folder}/${songData.beatmap.bgFilename}`;
         }
     }
     $: if(songData && songData.dataFile && !songData.beatmap) fetchBeatmap();
@@ -160,7 +158,7 @@
             top: {mouse.y}px;
             left: {mouse.x}px;
         ">
-            <source src="file:///{process.env.USERPROFILE.replace(/\\/g, "/")}/AppData/Local/osu!/Songs/{songData.folder}/{songData.beatmap.video}">
+            <source src="file://{osuFolder}/Songs/{songData.folder}/{songData.beatmap.video}">
         </video>
     {/if}
     <img src="images/logo.svg" alt="logo" class="logo" style="animation-duration: {animDuration}ms;" class:repeat={songData.playing}>
